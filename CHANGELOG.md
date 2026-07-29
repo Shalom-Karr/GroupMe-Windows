@@ -2,6 +2,44 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.2.1] — 2026-07-29
+
+### Added
+
+- **Typing indicators, connected.** `realtime.rs` had `watch_group` and
+  `send_typing`, and the client rendered "X is typing…" with an expiry timer,
+  but nothing called either — the feature was dead in both directions. Typing
+  is published per-conversation and the socket only subscribed to the account's
+  own channel, so no notice could arrive; and none was ever sent.
+  `client_watch_conversation` now subscribes on open (dropping the previous
+  thread, so a long session cannot accumulate every thread visited) and
+  `client_typing` publishes, throttled to one notice per three seconds.
+
+### Fixed
+
+- **Memory is now bounded rather than left to defaults.** SQLite had no limits
+  beyond `journal_mode`/`synchronous`, and the remaining defaults scale with
+  file size rather than working set on a multi-gigabyte archive: now an 8 MiB
+  page cache, a 16 MiB `journal_size_limit` so a first-run backfill does not
+  leave a permanently huge `-wal`, and `temp_store=FILE` with a 64 MiB
+  `soft_heap_limit` so FTS merges spill to disk instead of RSS. `mmap_size` is
+  deliberately left unset.
+- **Retained message data was unbounded** even though the DOM was not: the chunk
+  observer frees nodes but each chunk kept its message array, so a window left
+  open in a busy group grew forever. Capped at 3,000 messages, trimming only the
+  oldest end and only while the reader is at the bottom; recovery is the
+  existing scroll-up refetch.
+- `MAX_UPLOAD_BYTES` reduced from 50 MiB to 16 MiB. That number sets a memory
+  spike, not a policy — the bytes exist at once as a JS array, an IPC payload,
+  and a `Vec<u8>`.
+
+### Note
+
+Measured on the running app: the Rust host is 12 MB, while WebView2 holding
+`web.groupme.com` is ~445 MB across ten processes. The archive layer was never
+the memory problem — the wrapped web app is, which is why the custom client is
+the real fix.
+
 ## [0.2.0] — 2026-07-29
 
 The app grows its own client. Until now it was a wrapper around
