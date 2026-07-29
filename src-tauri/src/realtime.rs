@@ -101,6 +101,12 @@ enum Command {
     Typing(String),
 }
 
+/// The live worker, held in Tauri managed state. `None` until a token has been
+/// verified. Replacing the handle drops the previous one, which closes its
+/// command channel — the old worker's shutdown signal — so a token rotation
+/// swaps the socket rather than adding a second one.
+pub type RealtimeSlot = Arc<tokio::sync::Mutex<Option<RealtimeHandle>>>;
+
 pub struct RealtimeHandle {
     inner: Arc<HandleInner>,
 }

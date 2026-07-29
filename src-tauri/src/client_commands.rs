@@ -42,9 +42,14 @@ type CmdResult<T> = Result<T, String>;
 pub const MAX_TEXT_CHARS: usize = 1000;
 
 /// GroupMe's image service caps uploads well below this. The point of the check
-/// is to refuse a 4 GB file before it is read into a `Vec<u8>` and pushed
+/// is to refuse a huge file before it is read into a `Vec<u8>` and pushed
 /// through the IPC bridge, not to predict their limit.
-pub const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+///
+/// 16 MiB rather than something round and generous, because this number sets a
+/// memory spike, not just a policy: the bytes exist simultaneously as a JS
+/// array, as the IPC serialisation of it, and as a `Vec<u8>` here. A limit that
+/// no real photo reaches costs nothing to enforce and bounds the worst case.
+pub const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 const NOT_SIGNED_IN: &str =
     "not signed in yet — open GroupMe and wait for the account to be verified";
@@ -470,6 +475,47 @@ pub async fn client_upload_image(
         .map_err(|e| map_api("uploading the image", e))
 }
 
+/// Subscribes the realtime socket to a conversation's own channel.
+///
+/// Messages arrive on the account's `/user/{id}` channel regardless, so this is
+/// not what makes the thread live — it is what delivers that thread's typing
+/// notices, which are published per-conversation and are invisible without it.
+/// Idempotent and safe while the socket is down: the subscription set is
+/// replayed on reconnect.
+#[tauri::command]
+pub async fn client_watch_conversation(
+    realtime: State<'_, crate::realtime::RealtimeSlot>,
+    conversation_id: String,
+    previous_id: Option<String>,
+) -> CmdResult<bool> {
+    let guard = realtime.lock().await;
+    let Some(rt) = guard.as_ref() else {
+        // No socket yet. Not an error: polling still delivers messages, so the
+        // thread works — it just has no typing notices until realtime is up.
+        return Ok(false);
+    };
+    // Dropping the old subscription as the user leaves keeps the set bounded;
+    // a long session would otherwise accumulate every thread ever opened.
+    if let Some(prev) = previous_id.as_deref().filter(|p| *p != conversation_id) {
+        rt.unwatch_group(prev);
+    }
+    rt.watch_group(&conversation_id);
+    Ok(rt.is_connected())
+}
+
+/// Publishes a typing notice. Fire-and-forget by design: a dropped notice is
+/// invisible, and a failure here must never interrupt composing.
+#[tauri::command]
+pub async fn client_typing(
+    realtime: State<'_, crate::realtime::RealtimeSlot>,
+    conversation_id: String,
+) -> CmdResult<()> {
+    if let Some(rt) = realtime.lock().await.as_ref() {
+        rt.send_typing(&conversation_id);
+    }
+    Ok(())
+}
+
 pub const UI_WEB: &str = "web";
 pub const UI_CLIENT: &str = "client";
 const META_PREFERRED_UI: &str = "preferred_ui";
@@ -541,8 +587,9 @@ mod tests {
             found += 1;
         }
         assert_eq!(
-            found, 9,
-            "expected exactly the nine client commands (7 mutations + 2 ui-preference)"
+            found, 11,
+            "expected exactly the eleven client commands \
+             (7 mutations + 2 realtime bridges + 2 ui-preference)"
         );
     }
 
@@ -699,9 +746,12 @@ mod tests {
         assert!(validate_upload_size(1).is_ok());
         assert!(validate_upload_size(MAX_UPLOAD_BYTES).is_ok());
         let err = validate_upload_size(MAX_UPLOAD_BYTES + 1).unwrap_err();
+        // Derived from the constant, not written out: a hardcoded "50 MB" here
+        // is what broke when the limit was lowered to bound the IPC spike.
+        let limit_mb = format!("{} MB", MAX_UPLOAD_BYTES / (1024 * 1024));
         assert!(
-            err.contains("50 MB"),
-            "the error must name the limit: {err}"
+            err.contains(&limit_mb),
+            "the error must name the limit ({limit_mb}): {err}"
         );
         assert!(validate_upload_size(0).is_err());
     }

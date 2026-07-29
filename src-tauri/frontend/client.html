@@ -1355,6 +1355,48 @@
     // afterwards would be measuring an empty element.
     materialise(chunk);
     if (observer) observer.observe(chunk.el);
+    trimRetained();
+  }
+
+  /* Caps retained message *data*, which the chunk observer does not.
+     Dematerialising frees DOM nodes but each chunk keeps its `msgs` array, so a
+     window left open all day in a busy group grows without limit even though
+     the DOM stays flat.
+
+     Only ever trims the oldest end, and only while the reader is at the bottom
+     — so it never discards what someone is looking at, and recovery is the
+     scroll-up path that already exists: reset the cursor to the new oldest
+     retained id and let `pageOlder` refetch on demand. */
+  var MAX_RETAINED = 3000;
+  function trimRetained() {
+    if (!state.atBottom) return;
+    var total = 0;
+    for (var i = 0; i < state.chunks.length; i++) total += state.chunks[i].msgs.length;
+    if (total <= MAX_RETAINED) return;
+
+    while (state.chunks.length > 1 && total > MAX_RETAINED) {
+      var oldest = state.chunks[0];
+      // Never drop so much that the thread empties; keep the newest chunk.
+      if (total - oldest.msgs.length < 1) break;
+      state.chunks.shift();
+      if (observer) observer.unobserve(oldest.el);
+      oldest.msgs.forEach(function (m) {
+        if (m && m.id != null) {
+          state.msgById.delete(String(m.id));
+          state.nodeById.delete(String(m.id));
+        }
+      });
+      if (oldest.el.parentNode) oldest.el.parentNode.removeChild(oldest.el);
+      total -= oldest.msgs.length;
+    }
+
+    // The archive still holds everything; only this view forgot it.
+    var first = state.chunks[0] && state.chunks[0].msgs[0];
+    if (first && first.id != null) {
+      state.cursor = String(first.id);
+      state.hasMore = true;
+      setTop("");
+    }
   }
 
   // Inserts a page of *older* messages (oldest-first) at the top, preserving
@@ -1807,6 +1849,12 @@
 
   async function openConversation(cid, anchorId) {
     var c = state.byId[cid];
+    // Typing notices are published per-conversation, so they only arrive for a
+    // thread the socket is subscribed to. Messages come over the account
+    // channel regardless, so this is best-effort and never gates the open.
+    if (HAS_IPC && cid !== state.active) {
+      call("client_watch_conversation", { conversationId: cid, previousId: state.active || null });
+    }
     state.active = cid;
     state.activeKind = (c && c.kind) || (String(cid).indexOf("+") >= 0 ? "dm" : "group");
     state.cursor = null;
@@ -2657,7 +2705,26 @@
     fileEl.value = "";
   });
 
-  input.addEventListener("input", function () { autoGrow(); if (cnote.classList.contains("cerr")) setError(""); syncComposer(); });
+  /* Throttled: GroupMe's own client republishes while you keep typing rather
+     than sending one notice per keystroke, and the notice carries its own
+     expiry, so a fixed floor between publishes is enough. */
+  var TYPING_EVERY_MS = 3000;
+  var lastTypingAt = 0;
+  function noteTyping() {
+    if (!HAS_IPC || !state.active) return;
+    var now = Date.now();
+    if (now - lastTypingAt < TYPING_EVERY_MS) return;
+    lastTypingAt = now;
+    call("client_typing", { conversationId: state.active });
+  }
+
+  input.addEventListener("input", function () {
+    autoGrow();
+    if (cnote.classList.contains("cerr")) setError("");
+    syncComposer();
+    // Editing an existing message is not composing a new one.
+    if (input.value.trim() && !state.editing) noteTyping();
+  });
   input.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !e.shiftKey && !e.altKey) { e.preventDefault(); doSend(); return; }
     if (e.key === "Escape") {

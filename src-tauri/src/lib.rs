@@ -34,10 +34,7 @@ use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use commands::SharedStore;
 
-/// The live realtime worker, replaced wholesale when the token rotates.
-/// Dropping the previous handle closes its command channel, which is the
-/// worker's shutdown signal — so a rotation cannot leak a second socket.
-type RealtimeSlot = Arc<tokio::sync::Mutex<Option<realtime::RealtimeHandle>>>;
+use realtime::RealtimeSlot;
 
 pub const GROUPME_WEB_ORIGIN: &str = "https://web.groupme.com";
 pub const ARCHIVE_FILENAME: &str = "archive.db";
@@ -90,6 +87,8 @@ pub fn run() {
             client_commands::client_unreact,
             client_commands::client_mark_read,
             client_commands::client_upload_image,
+            client_commands::client_watch_conversation,
+            client_commands::client_typing,
             client_commands::client_ui_preference,
             client_commands::client_set_ui_preference,
             tray::show_app_menu,

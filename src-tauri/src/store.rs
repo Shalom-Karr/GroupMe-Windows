@@ -71,6 +71,32 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+
+        // Memory is bounded explicitly rather than left to defaults, because
+        // this archive reaches multiple gigabytes and every one of these knobs
+        // scales with the file rather than with the working set.
+        //
+        // A negative cache_size is KiB rather than pages, so this is 8 MiB
+        // regardless of page size. The access pattern is a 60-row page at the
+        // tip of one conversation plus FTS lookups; a larger cache buys almost
+        // nothing and a smaller one starts thrashing the FTS index.
+        conn.pragma_update(None, "cache_size", -8_000)?;
+
+        // Cap the WAL instead of letting it grow to match a long sync burst.
+        // The default autocheckpoint is 1000 pages, but nothing truncates the
+        // file afterwards, so a first-run backfill of 142k messages leaves a
+        // permanently large -wal alongside the archive.
+        conn.pragma_update(None, "journal_size_limit", 16 * 1024 * 1024)?;
+
+        // Scratch space for FTS merges and ORDER BY spills goes to memory up to
+        // a hard ceiling, then to a temp file — never unbounded RSS.
+        conn.pragma_update(None, "temp_store", "FILE")?;
+        conn.pragma_update(None, "soft_heap_limit", 64 * 1024 * 1024)?;
+
+        // Deliberately NOT setting mmap_size. Memory-mapping a multi-gigabyte
+        // archive charges every page touched to the process working set, which
+        // is exactly the number a user watching Task Manager reacts to, and it
+        // buys throughput this app does not need — it reads 60 rows at a time.
         let mut store = Self { conn };
         store.migrate()?;
         Ok(store)
