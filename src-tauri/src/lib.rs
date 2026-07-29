@@ -73,7 +73,26 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_log::Builder::new().build())
+        // Levels, not defaults. `Builder::new()` logs TRACE for every crate in
+        // the tree, and the websocket stack alone emits a dozen lines per
+        // keepalive — measured at 92% of a real log file, which rotated away
+        // the connectivity transitions and media failures it existed to record.
+        // A log that destroys its own evidence is worse than no log, and it
+        // costs disk writes and formatting CPU on every frame to do it.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                // Ours stays chatty — this is the part worth reading.
+                .level_for("groupme_desktop_lib", log::LevelFilter::Debug)
+                // Transport internals only matter once something is wrong.
+                .level_for("tungstenite", log::LevelFilter::Warn)
+                .level_for("tokio_tungstenite", log::LevelFilter::Warn)
+                .level_for("reqwest", log::LevelFilter::Warn)
+                .level_for("hyper", log::LevelFilter::Warn)
+                .level_for("hyper_util", log::LevelFilter::Warn)
+                .level_for("rustls", log::LevelFilter::Warn)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::archive_conversations,
             commands::archive_messages,
@@ -143,6 +162,8 @@ pub fn run() {
                 });
             }
 
+            spawn_page_diagnostics(app.handle().clone());
+            spawn_webview_watchdog(app.handle().clone());
             spawn_token_listener(app.handle().clone(), shared.clone(), media_dir.clone());
             spawn_ui_switch_listener(app.handle().clone(), window.clone());
             spawn_connectivity_watch(app.handle().clone(), window, shared.clone());
@@ -178,6 +199,103 @@ pub fn run() {
                 updater::install_staged_on_exit();
             }
         });
+}
+
+/// Records what the webview is actually doing, from the webview's own point of
+/// view.
+///
+/// A release build has no devtools and a remote page has no console we can read,
+/// so a blank window is otherwise indistinguishable from a page that loaded and
+/// rendered nothing. `inject.js` reports its lifecycle here; this puts it in the
+/// log next to the backend's own lines, on one timeline.
+///
+/// Untrusted like every other event from that origin — it is only ever logged,
+/// never acted on, and every field is length-capped at the source.
+/// Set by the first page beacon of the session. Its absence is the only
+/// reliable signal that the webview never came up — see the watchdog below.
+static PAGE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns a silently broken window into a diagnosable one.
+///
+/// `WebviewWindowBuilder::build()` can return `Ok` while WebView2 has failed to
+/// attach a webview to the window — wry logs the `HRESULT` and carries on. The
+/// result is a window that paints nothing, while the backend keeps syncing and
+/// the realtime socket keeps running, so every other signal says the app is
+/// healthy. That is indistinguishable, from the outside, from a UI bug, and it
+/// cost a full debugging session to tell apart.
+///
+/// Observed cause: WebView2's user-data folder admits one owner at a time. If a
+/// previous instance's WebView2 processes outlive it — a force-kill, a crash, or
+/// an update that relaunches before the old children exit — the next launch
+/// loses the race and gets `E_INVALIDARG` (0x80070057). It clears itself once
+/// those processes exit, which is why it presents as intermittent.
+///
+/// So: if no page has reported in by the deadline, say so loudly and tell the
+/// user the one thing that actually fixes it. Deliberately does not relaunch on
+/// its own — the failure is a race against processes we may not have finished
+/// losing, and an automatic restart risks a loop that is worse than a message.
+fn spawn_webview_watchdog(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        if PAGE_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        log::error!(
+            "no page reported in 15s — the webview almost certainly failed to attach, so the \
+             window is blank while the archive keeps syncing normally. Look for \
+             `failed to create webview` above; 0x80070057 means another WebView2 process still \
+             holds {}. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
+             msedgewebview2.exe for this app remains, then reopen.",
+            "the app's user-data folder"
+        );
+
+        // The tray is the only surface still working in this state, so the
+        // notification is the one channel that can reach the user at all.
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title("GroupMe could not draw its window")
+            .body(
+                "The window is blank because the webview failed to start. Your messages are \
+                 still being archived. Quit from the tray icon and reopen to fix it.",
+            )
+            .show();
+    });
+}
+
+fn spawn_page_diagnostics(app: tauri::AppHandle) {
+    app.listen("groupme://page", move |event| {
+        PAGE_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(event.payload()) else {
+            return;
+        };
+        let get = |k: &str| {
+            v.get(k)
+                .and_then(|s| s.as_str())
+                .unwrap_or("?")
+                .chars()
+                .take(300)
+                .collect::<String>()
+        };
+        let stage = get("stage");
+        let detail = v.get("detail").and_then(|s| s.as_str()).unwrap_or("");
+        // Errors are warnings; the rest is the ordinary lifecycle.
+        if stage.contains("error") || stage.contains("rejection") {
+            log::warn!(
+                "page[{stage}] {} (readyState={}) {detail}",
+                get("url"),
+                get("readyState")
+            );
+        } else {
+            log::info!(
+                "page[{stage}] {} (readyState={}) {detail}",
+                get("url"),
+                get("readyState")
+            );
+        }
+    });
 }
 
 /// Waits for the injected script to hand over an access token, then persists it
@@ -712,6 +830,33 @@ mod tests {
         assert!(INJECT_JS.len() > 500, "inject.js missing or truncated");
         assert!(INJECT_JS.contains("api.groupme.com"));
         assert!(INJECT_JS.contains("groupme://token"));
+    }
+
+    /// The watchdog is only as good as the beacon that clears it, and the beacon
+    /// lives in a file this crate does not compile — so nothing but a test keeps
+    /// the two names in step. If the event name drifts, every launch would report
+    /// a broken webview 15 seconds in and tell the user to restart a working app.
+    #[test]
+    fn the_page_beacon_the_watchdog_waits_for_is_the_one_inject_js_sends() {
+        assert!(
+            INJECT_JS.contains("groupme://page"),
+            "inject.js must emit the beacon the webview watchdog listens for"
+        );
+        // The lifecycle stages the log messages are written to describe.
+        for stage in ["script-start", "dom-ready", "load"] {
+            assert!(
+                INJECT_JS.contains(stage),
+                "inject.js should report the {stage} stage"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ui_toggle_reaches_rust_by_the_name_rust_listens_for() {
+        // Same split-brain risk as the beacon: the button is in inject.js, the
+        // listener is in this file, and a remote origin cannot invoke commands —
+        // so this event is the only path between them.
+        assert!(INJECT_JS.contains("groupme://switch-ui"));
     }
 
     #[test]

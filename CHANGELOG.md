@@ -2,6 +2,53 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.3.0] — 2026-07-29
+
+### Fixed
+
+- **The window could open completely blank, and nothing said why.**
+  `WebviewWindowBuilder::build()` returns `Ok` even when WebView2 fails to attach
+  a webview — wry logs the `HRESULT` and carries on — so the app ran with a
+  window that painted nothing while the archive synced and the realtime socket
+  stayed connected. Every other signal said the app was healthy.
+
+  Cause: WebView2's user-data folder admits one owner at a time. When a previous
+  instance's WebView2 processes outlive it — a force-kill, a crash, or an update
+  that relaunches before the old children exit — the next launch loses the race
+  and gets `E_INVALIDARG` (`0x80070057`). It clears once those processes exit,
+  which is why it looked intermittent and unreproducible.
+
+  Confirmed by holding the binary constant and changing only the profile: the
+  existing folder failed to create a webview, a fresh one loaded the router and
+  reached `web.groupme.com` normally.
+
+### Added
+
+- **Page lifecycle diagnostics.** A release build has no devtools and a remote
+  page has no console to read, so a blank window was previously indistinguishable
+  from a page that loaded and rendered nothing. `inject.js` now reports
+  `script-start` / `dom-ready` / `load` (with body text length), plus JS errors,
+  unhandled rejections and failed resources, over the event channel; Rust logs
+  them on one timeline beside the backend's own lines. Untrusted like anything
+  from that origin — only ever logged, never acted on, every field capped at the
+  source.
+- **A webview watchdog.** If no page reports in within 15 seconds, the app logs
+  the specific cause and remedy and raises a notification, because the tray is
+  the only surface still working in that state. It deliberately does not
+  relaunch itself: the failure is a race against processes we may not have
+  finished losing, and an automatic restart risks a loop worse than a message.
+- Two contract tests pin the event names shared between `inject.js` and Rust.
+  The beacon and the UI toggle cross a file boundary the compiler cannot check,
+  and a drifted name would have the watchdog declare every healthy launch broken.
+
+### Changed
+
+- **Logging is levelled.** `tauri_plugin_log::Builder::new()` logs `TRACE` for
+  every crate in the tree; the websocket stack alone emitted a dozen lines per
+  keepalive, measured at **92% of a real log file**, rotating away the very
+  connectivity transitions and media failures the log existed to record. Now
+  `Info` globally, `Debug` for this crate, `Warn` for the transport crates.
+
 ## [0.2.1] — 2026-07-29
 
 ### Added

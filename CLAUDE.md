@@ -136,6 +136,35 @@ token capture) can only be attached at build time — so `app.windows` stays `[]
 the `asset:` scheme handler is never registered, so every cached image is
 downloaded to disk and can never be displayed — it fails gracefully and silently.
 
+**A window can open with no webview in it, and `build()` still returns `Ok`.**
+WebView2's user-data folder admits one owner at a time. If a previous instance's
+`msedgewebview2.exe` processes outlive it — a force-kill, a crash, or an update
+that relaunches before the old children exit — the next launch loses the race and
+webview creation fails with `E_INVALIDARG` (`0x80070057`). wry logs
+`failed to create webview` and carries on, so the app runs with a **blank white
+window** while sync and the realtime socket work perfectly. Every signal except
+the window says the app is healthy, which is indistinguishable from a UI bug.
+
+It clears itself once the orphaned processes exit, so it presents as
+intermittent. To tell it apart in one step, hold the binary constant and change
+only the profile:
+
+```bash
+WEBVIEW2_USER_DATA_FOLDER=/some/fresh/dir ./app.exe   # loads => the old profile was held
+```
+
+The app now detects this: `inject.js` emits `groupme://page` lifecycle beacons and
+a 15s watchdog reports the cause when none arrive. **A wrapper cannot debug its
+own webview without that bridge** — a release build has no devtools, and a remote
+page has no console to read.
+
+**Log levels, not defaults.** `tauri_plugin_log::Builder::new()` logs `TRACE` for
+every crate in the tree. The websocket stack alone emits a dozen lines per
+keepalive: measured at 92% of a real log file, which rotated away the
+connectivity transitions and media errors the log existed to record. A log that
+destroys its own evidence is worse than no log. Set `.level(Info)`, keep this
+crate at `Debug`, and pin the transport crates to `Warn`.
+
 **Restore before show.** `show()` maps to `ShowWindow(SW_SHOW)`, which on a
 *minimized* window leaves it iconic. Calling `show()` then `unminimize()`
 restores nothing, and every route back to the app appears to do nothing:

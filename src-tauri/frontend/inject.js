@@ -198,6 +198,49 @@
     tauriEmit('groupme://offline', {});
   });
 
+  // ── Page diagnostics ──────────────────────────────────────────────────────
+  // A wrapper cannot see inside its own webview: when a page renders blank
+  // there is no console to read, no devtools in a release build, and the Rust
+  // log only proves the *backend* is healthy. So the page reports its own
+  // lifecycle over the event channel, and Rust writes it to the log.
+  //
+  // This is the difference between "the window is white" and knowing which URL
+  // was reached, whether scripts ran, and what threw.
+  function beacon(stage, extra) {
+    var payload = {
+      stage: stage,
+      url: String(location.href).slice(0, 300),
+      readyState: document.readyState,
+    };
+    if (extra) { payload.detail = String(extra).slice(0, 500); }
+    tauriEmit('groupme://page', payload);
+  }
+
+  beacon('script-start');
+
+  window.addEventListener('error', function (e) {
+    // Resource errors (img/script/css) have no `message` and target the element.
+    if (e && e.target && e.target !== window && e.target.tagName) {
+      beacon('resource-error', e.target.tagName + ' ' + (e.target.src || e.target.href || ''));
+      return;
+    }
+    beacon('js-error', (e && e.message) + ' @ ' + (e && e.filename) + ':' + (e && e.lineno));
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    beacon('unhandled-rejection', (r && (r.stack || r.message)) || r);
+  });
+
+  document.addEventListener('DOMContentLoaded', function () { beacon('dom-ready'); });
+  window.addEventListener('load', function () {
+    // Body text length distinguishes "rendered" from "loaded but blank", which
+    // is exactly the ambiguity a white window presents.
+    var len = 0;
+    try { len = (document.body && document.body.innerText || '').length; } catch (e) {}
+    beacon('load', 'bodyTextLength=' + len);
+  });
+
   // ── Surface toggle ────────────────────────────────────────────────────────
   // A small fixed button that switches to the app's own client UI. It goes
   // over the EVENT channel because a remote origin cannot invoke commands;
