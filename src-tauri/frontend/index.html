@@ -6,89 +6,171 @@
   "can't reach this page" error — which is the moment a wrapped web app stops
   feeling like an app.
 
-  Deliberately self-contained: no CDN, no fonts, no build step. Anything fetched
-  from the network here would fail in exactly the case this page exists to
-  handle.
+  Deliberately self-contained: no CDN, no downloaded fonts, no build step — every
+  face named here ships with Windows. Anything fetched from the network would fail
+  in exactly the case this page exists to handle.
 -->
 <meta charset="utf-8" />
 <title>GroupMe</title>
 <style>
   :root {
-    --accent: #3c16d3;
-    --bg: #ffffff;
-    --fg: #16161d;
-    --muted: #6b6b7b;
-    --card: #f5f5f8;
-    --border: #e3e3ea;
+    color-scheme: light dark;
+
+    --font-display: "Sitka Heading", Constantia, Georgia, serif;
+    --font-ui:      Corbel, Candara, "Segoe UI", sans-serif;
+    --font-label:   "Bahnschrift SemiLight", Bahnschrift, Corbel, sans-serif;
+    --font-mono:    "Cascadia Mono", Consolas, monospace;
+
+    --bg: #f6f3ec; --surface: #fffdf8; --raised: #ece7db;
+    --rule: #dcd5c6; --fg: #16130d; --fg-soft: #5d5647;
+    --accent: #a8341f; --accent-soft: #f2e3dc;
+    --ok: #1f5c56; --warn: #8a5a00;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e0e14;
-      --fg: #f2f2f6;
-      --muted: #9a9aab;
-      --card: #191922;
-      --border: #2a2a36;
+      --bg: #100e0c; --surface: #191611; --raised: #221e18;
+      --rule: #302a22; --fg: #f1ece1; --fg-soft: #9d9483;
+      --accent: #e2603f; --accent-soft: #33211b;
+      --ok: #4fb3a4; --warn: #d4a24c;
     }
   }
+
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg);
     color: var(--fg);
-    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 15px/1.6 var(--font-ui);
     display: grid;
     place-items: center;
     -webkit-user-select: none;
     user-select: none;
   }
-  .wrap { text-align: center; max-width: 22rem; padding: 2rem; }
+
+  /* A title page: mark, standing head, rule, status line, action. */
+  .sheet { width: 21rem; padding: 2rem; text-align: center; }
+
   .mark {
-    width: 72px; height: 72px; margin: 0 auto 1.25rem;
-    border-radius: 20px; background: var(--accent);
+    width: 40px; height: 40px; margin: 0 auto 1.15rem;
+    border: 1px solid var(--rule); border-radius: 2px;
+    background: var(--surface);
     display: grid; place-items: center;
   }
-  .mark svg { width: 40px; height: 40px; }
-  h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 .35rem; letter-spacing: -.01em; }
-  p { margin: 0; color: var(--muted); font-size: .9rem; }
+  .mark svg { width: 20px; height: 20px; display: block; }
+  .mark path  { stroke: var(--fg-soft); }
+  .mark .a    { stroke: var(--accent); }
+
+  .wordmark {
+    font-family: var(--font-label);
+    font-size: .625rem;
+    letter-spacing: .3em;
+    text-transform: uppercase;
+    color: var(--fg-soft);
+    margin: 0 0 .9rem;
+    padding-left: .3em; /* optical: absorbs the trailing letter-space */
+  }
+
+  /* Hairline with a short accent segment — the one flourish on the page. */
+  .hair {
+    height: 1px; background: var(--rule);
+    margin: 0 auto 1.35rem; position: relative;
+  }
+  .hair::after {
+    content: ""; position: absolute; top: 0; left: 50%;
+    width: 1.75rem; height: 1px; margin-left: -.875rem;
+    background: var(--accent);
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-size: 1.5rem; font-weight: 400; line-height: 1.25;
+    letter-spacing: -.005em;
+    margin: 0 0 .4rem;
+  }
+  p#detail { margin: 0; color: var(--fg-soft); font-size: .875rem; }
+
   .bar {
-    width: 160px; height: 3px; margin: 1.5rem auto 0;
-    background: var(--border); border-radius: 2px; overflow: hidden;
+    width: 11rem; height: 2px; margin: 1.6rem auto 0;
+    background: var(--rule); overflow: hidden;
   }
   .bar i {
-    display: block; width: 40%; height: 100%; border-radius: 2px;
-    background: var(--accent); animation: slide 1.1s ease-in-out infinite;
+    display: block; width: 34%; height: 100%;
+    background: var(--accent);
+    animation: sweep 1.5s cubic-bezier(.5, 0, .5, 1) infinite;
   }
-  @keyframes slide {
+  @keyframes sweep {
     0%   { transform: translateX(-100%); }
-    100% { transform: translateX(300%); }
+    100% { transform: translateX(295%); }
   }
-  .actions { margin-top: 1.5rem; display: none; gap: .5rem; justify-content: center; }
+
+  .actions { margin-top: 1.6rem; display: none; gap: .5rem; justify-content: center; }
   .actions.show { display: flex; }
   button {
-    font: inherit; font-size: .875rem; padding: .5rem 1rem;
-    border-radius: 9px; border: 1px solid var(--border);
-    background: var(--card); color: var(--fg); cursor: pointer;
+    font-family: var(--font-ui); font-size: .8125rem;
+    padding: .5rem 1.05rem;
+    border-radius: 2px; border: 1px solid var(--rule);
+    background: var(--surface); color: var(--fg);
+    cursor: pointer;
+    transition: border-color .14s ease, background-color .14s ease;
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button:hover { filter: brightness(1.08); }
-  @media (prefers-reduced-motion: reduce) { .bar i { animation: none; width: 100%; } }
+  button:hover { border-color: var(--fg-soft); }
+  button.primary {
+    background: var(--accent); border-color: var(--accent);
+    color: var(--surface);
+  }
+  button.primary:hover { filter: brightness(1.07); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .colophon {
+    position: fixed; left: 0; right: 0; bottom: 1.75rem;
+    margin: 0; text-align: center;
+    font-size: .6875rem; color: var(--fg-soft);
+  }
+
+  /* One orchestrated reveal, top to bottom, instead of scattered motion. */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .sheet > *, .colophon { animation: rise .5s cubic-bezier(.2, .7, .3, 1) both; }
+  .sheet > *:nth-child(1) { animation-delay: .04s; }
+  .sheet > *:nth-child(2) { animation-delay: .10s; }
+  .sheet > *:nth-child(3) { animation-delay: .16s; }
+  .sheet > *:nth-child(4) { animation-delay: .22s; }
+  .sheet > *:nth-child(5) { animation-delay: .28s; }
+  .sheet > *:nth-child(6) { animation-delay: .34s; }
+  .colophon { animation-delay: .46s; }
+  /* The action row reveals when it is unhidden, not on load. */
+  .sheet .actions { animation: none; }
+  .sheet .actions.show { animation: rise .4s cubic-bezier(.2, .7, .3, 1) both; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bar i { animation: none; width: 100%; }
+    .sheet > *, .colophon, .sheet .actions.show { animation: none; }
+    button { transition: none; }
+  }
 </style>
 
-<div class="wrap">
+<main class="sheet">
   <div class="mark" aria-hidden="true">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/>
+    <svg viewBox="0 0 20 20" fill="none" stroke-width="1.3" stroke-linecap="square">
+      <path d="M2.5 3.25v13.5"/>
+      <path d="M6 6h11"/>
+      <path d="M6 10h11"/>
+      <path class="a" d="M6 14h6"/>
     </svg>
   </div>
-  <h1 id="title">Connecting…</h1>
-  <p id="detail">Checking your connection</p>
+  <p class="wordmark">GroupMe Archive</p>
+  <div class="hair" aria-hidden="true"></div>
+  <h1 id="title" aria-live="polite">Connecting…</h1>
+  <p id="detail" aria-live="polite">Checking your connection</p>
   <div class="bar" id="bar"><i></i></div>
   <div class="actions" id="actions">
     <button class="primary" id="retry">Try again</button>
     <button id="offline">Read offline</button>
   </div>
-</div>
+</main>
+<p class="colophon">Your messages are archived locally, on this PC.</p>
 
 <script>
   const LIVE = "https://web.groupme.com";

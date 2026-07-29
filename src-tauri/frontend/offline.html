@@ -11,352 +11,474 @@
   situation this page exists to handle — and it would fail as a broken icon in
   the middle of someone's conversation.
 
-  Read-only. There is a composer, and it is permanently disabled. No code path in
-  this file sends, edits, deletes, or reacts; there is no form and no submit
-  target. That matches the IPC surface, which exposes only archive_* readers.
-  Sending belongs to the live client, and it comes back when the connection does.
+  Read-only. There is no composer, no form, no submit target, and no code path
+  that sends, edits, deletes, or reacts — the page states the boundary in its
+  colophon instead of miming a dead input. That matches the IPC surface, which
+  exposes only archive_* readers. Sending belongs to the live client, and it
+  comes back when the connection does.
+
+  The look is deliberate: a periodical, not a chat window. Being offline is the
+  normal operating condition of an archive, so it is set as a standing note
+  rather than an error.
 -->
 <meta charset="utf-8" />
-<title>GroupMe — Offline Archive</title>
+<title>The Archive — offline reader</title>
 <style>
   :root {
-    --accent: #3c16d3;
-    --bg: #ffffff;
-    --fg: #16161d;
-    --muted: #6b6b7b;
-    --card: #f5f5f8;
-    --border: #e3e3ea;
+    --font-display: "Sitka Heading", Constantia, Georgia, serif;
+    --font-ui:      Corbel, Candara, "Segoe UI", sans-serif;
+    --font-label:   "Bahnschrift SemiLight", Bahnschrift, Corbel, sans-serif;
+    --font-mono:    "Cascadia Mono", Consolas, monospace;
 
-    --panel: #fbfbfd;
-    --hover: #eeeef4;
-    --sel: #e7e2fb;
-    --mine-bg: #3c16d3;
-    --mine-fg: #ffffff;
-    --tint: rgba(60, 22, 211, .08);
-    --shadow: 0 1px 2px rgba(16, 16, 29, .06);
+    --bg: #f6f3ec; --surface: #fffdf8; --raised: #ece7db;
+    --rule: #dcd5c6; --fg: #16130d; --fg-soft: #5d5647;
+    --accent: #a8341f; --accent-soft: #f2e3dc;
+    --ok: #1f5c56; --warn: #8a5a00;
+
+    /* Laid-paper tooth. Two hairline gradients, no image, no shadow. */
+    --grain: rgba(22, 19, 13, .024);
+    --index-w: 20.5rem;
+    --gutter: 3.4rem;   /* left margin of the reading column: plate, then time */
+    --measure: 34rem;   /* reading measure — roughly 68 characters at .95rem */
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e0e14;
-      --fg: #f2f2f6;
-      --muted: #9a9aab;
-      --card: #191922;
-      --border: #2a2a36;
+      --bg: #100e0c; --surface: #191611; --raised: #221e18;
+      --rule: #302a22; --fg: #f1ece1; --fg-soft: #9d9483;
+      --accent: #e2603f; --accent-soft: #33211b;
+      --ok: #4fb3a4; --warn: #d4a24c;
 
-      --panel: #12121a;
-      --hover: #1f1f2a;
-      --sel: #241c46;
-      --mine-bg: #4a24e0;
-      --mine-fg: #ffffff;
-      --tint: rgba(122, 92, 244, .14);
-      --shadow: none;
+      --grain: rgba(241, 236, 225, .02);
     }
   }
 
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--bg);
+    background-color: var(--bg);
+    background-image: repeating-linear-gradient(0deg, var(--grain) 0 1px, transparent 1px 4px);
     color: var(--fg);
-    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 400 15px/1.6 var(--font-ui);
     -webkit-user-select: none;
     user-select: none;
     overflow: hidden;
+    -webkit-font-smoothing: antialiased;
   }
-  ::selection { background: var(--sel); }
+  ::selection { background: var(--accent-soft); color: var(--fg); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .app { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
+  /* Small tracked uppercase metadata. Used everywhere a label is not prose. */
+  .kicker {
+    font-family: var(--font-label); font-size: .625rem; line-height: 1.4;
+    letter-spacing: .2em; text-transform: uppercase; color: var(--fg-soft);
+  }
+  .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+  kbd {
+    font-family: var(--font-mono); font-size: .72rem; padding: .04rem .32rem;
+    border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 2px;
+    background: var(--surface); color: var(--fg);
+  }
+  mark {
+    background: var(--accent-soft); color: var(--fg); padding: 0 .1em;
+    border-radius: 1px; box-shadow: inset 0 -1px var(--accent);
+  }
 
-  /* ---------- sidebar ---------- */
+  .app {
+    display: grid;
+    grid-template-columns: var(--index-w) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100%;
+  }
 
-  .sidebar {
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    grid-column: 1 / -1;
+    display: flex; align-items: flex-end; gap: 1rem 1.25rem; flex-wrap: wrap;
+    padding: .85rem 1.75rem .75rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--rule);
+  }
+  .masthead-title {
+    font-family: var(--font-display); font-size: 1.3rem; font-weight: 600;
+    letter-spacing: -.015em; line-height: 1.05; margin: .2rem 0 0;
+  }
+  .masthead-title .thin { font-weight: 400; font-style: italic; color: var(--fg-soft); }
+
+  /* Offline is the standing condition here, not a fault: --ok, not --warn. */
+  .standing {
+    margin-left: auto; display: flex; align-items: center; gap: .5rem;
+    padding: .32rem .6rem; border: 1px solid var(--rule); border-radius: 2px;
+    background: var(--bg);
+  }
+  .beacon { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+
+  /* ---------- index column ---------- */
+
+  .index {
     display: flex; flex-direction: column; min-width: 0; min-height: 0;
-    background: var(--panel);
-    border-right: 1px solid var(--border);
+    background: var(--surface);
+    border-right: 1px solid var(--rule);
   }
-  .side-head { padding: .85rem .85rem .6rem; border-bottom: 1px solid var(--border); }
-  .brand { display: flex; align-items: center; gap: .55rem; margin-bottom: .75rem; }
-  .mark {
-    width: 28px; height: 28px; flex: none;
-    border-radius: 9px; background: var(--accent);
-    display: grid; place-items: center;
-  }
-  .mark svg { width: 16px; height: 16px; }
-  .brand-name { font-size: .9rem; font-weight: 600; letter-spacing: -.01em; }
-  .pill {
-    margin-left: auto; font-size: .68rem; font-weight: 600; letter-spacing: .04em;
-    text-transform: uppercase; padding: .18rem .45rem; border-radius: 6px;
-    color: var(--muted); background: var(--card); border: 1px solid var(--border);
-    display: inline-flex; align-items: center; gap: .3rem;
-  }
-  .pill .dot {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none;
-  }
-
-  .search { position: relative; }
-  .search svg {
-    position: absolute; left: .55rem; top: 50%; transform: translateY(-50%);
-    width: 14px; height: 14px; color: var(--muted); pointer-events: none;
+  .index-head { padding: .95rem 1.15rem 1rem; border-bottom: 1px solid var(--rule); }
+  .field { position: relative; }
+  .field label { display: block; margin-bottom: .3rem; }
+  .field svg {
+    position: absolute; right: .1rem; bottom: .5rem;
+    width: 13px; height: 13px; color: var(--fg-soft); pointer-events: none;
   }
   input[type="search"] {
-    width: 100%; font: inherit; font-size: .85rem;
-    padding: .42rem .6rem .42rem 1.85rem;
-    border-radius: 9px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--fg);
+    width: 100%; font: inherit; font-size: .92rem;
+    padding: .18rem 1.5rem .34rem 0;
+    border: 0; border-bottom: 1px solid var(--rule); border-radius: 0;
+    background: none; color: var(--fg);
     -webkit-user-select: text; user-select: text;
   }
   input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
-  input[type="search"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--tint); }
-  input[type="search"]::placeholder { color: var(--muted); }
-
-  .list { flex: 1; overflow-y: auto; padding: .4rem; min-height: 0; }
-  .list-label {
-    font-size: .7rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
-    color: var(--muted); padding: .6rem .55rem .35rem;
+  input[type="search"]:focus {
+    outline: none; border-bottom-color: var(--accent); box-shadow: 0 1px 0 var(--accent);
   }
+  input[type="search"]::placeholder { color: var(--fg-soft); opacity: .75; }
+
+  .list { flex: 1; overflow-y: auto; min-height: 0; padding-bottom: 1rem; }
+  .list-head { display: flex; align-items: center; gap: .7rem; padding: .95rem 1.15rem .45rem; }
+  .list-head::after { content: ""; height: 1px; background: var(--rule); flex: 1; }
 
   .row {
-    display: flex; gap: .6rem; align-items: center; width: 100%;
-    padding: .5rem .55rem; border-radius: 10px;
-    border: 0; background: none; color: inherit; font: inherit; text-align: left;
-    cursor: pointer;
+    position: relative; width: 100%; text-align: left; cursor: pointer;
+    display: grid; grid-template-columns: 2.15rem minmax(0, 1fr); column-gap: .8rem;
+    align-items: start;
+    padding: .62rem 1.15rem .68rem;
+    border: 0; border-bottom: 1px solid var(--rule); border-radius: 0;
+    background: none; color: inherit; font: inherit;
   }
-  .row:hover { background: var(--hover); }
-  .row.active { background: var(--sel); }
+  .row:hover { background: var(--raised); }
+  .row.active { background: var(--accent-soft); }
+  .row.active::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent);
+  }
   .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .row-body { min-width: 0; flex: 1; }
-  .row-top { display: flex; align-items: baseline; gap: .5rem; }
+  .row-body { min-width: 0; }
+  .row-top { display: flex; align-items: baseline; gap: .6rem; }
   .row-name {
-    font-size: .875rem; font-weight: 600; letter-spacing: -.01em;
+    font-family: var(--font-display); font-size: .95rem; font-weight: 600; letter-spacing: -.005em;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
   }
-  .row-time { font-size: .72rem; color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+  .row-time {
+    font-family: var(--font-mono); font-size: .64rem; color: var(--fg-soft);
+    flex: none; font-variant-numeric: tabular-nums;
+  }
   .row-prev {
-    font-size: .8rem; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: .05rem;
+    font-size: .8rem; color: var(--fg-soft); margin-top: .12rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row-quote {
+    font-size: .8rem; line-height: 1.45; color: var(--fg-soft); margin-top: .1rem;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .row-src { margin-bottom: .1rem; display: block; }
+  .ord {
+    font-family: var(--font-mono); font-size: .68rem; color: var(--fg-soft);
+    text-align: right; padding-top: .12rem; font-variant-numeric: tabular-nums;
   }
 
-  .avatar {
-    width: 34px; height: 34px; flex: none; border-radius: 50%;
-    object-fit: cover; background: var(--card);
-    display: grid; place-items: center;
-    font-size: .78rem; font-weight: 600; color: #fff; letter-spacing: .01em;
+  /* Uniform letterpress plate: recognition comes from the name, not a colour. */
+  .plate {
+    width: 2.15rem; height: 2.15rem; flex: none; border-radius: 2px;
+    background: var(--raised); border: 1px solid var(--rule);
+    display: grid; place-items: center; overflow: hidden; object-fit: cover;
+    font-family: var(--font-label); font-size: .66rem; letter-spacing: .08em; color: var(--fg-soft);
   }
-  .avatar.sm { width: 30px; height: 30px; font-size: .7rem; }
-  .avatar.square { border-radius: 10px; }
+  .plate.portrait { border-radius: 50%; }
+  .plate.sm { width: 1.7rem; height: 1.7rem; font-size: .58rem; }
 
-  .side-foot {
-    border-top: 1px solid var(--border); padding: .55rem .85rem;
-    font-size: .74rem; color: var(--muted);
+  .index-foot { border-top: 1px solid var(--rule); padding: .7rem 1.15rem .75rem; }
+  .index-foot .figures-line {
+    font-family: var(--font-mono); font-size: .7rem; color: var(--fg-soft);
+    font-variant-numeric: tabular-nums; margin-bottom: .2rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
-  .side-empty { padding: 1.5rem .9rem; color: var(--muted); font-size: .82rem; text-align: center; }
+  .list-empty { padding: 1.5rem 1.15rem; color: var(--fg-soft); font-size: .82rem; line-height: 1.6; }
+  .list-empty strong {
+    display: block; margin-bottom: .3rem; font-weight: 600; color: var(--fg);
+    font-family: var(--font-display); font-size: .98rem;
+  }
 
-  /* ---------- main ---------- */
+  /* ---------- reading room ---------- */
 
-  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 
   .thread { display: none; flex-direction: column; flex: 1; min-height: 0; }
   .thread.show { display: flex; }
 
   .thread-head {
-    display: flex; align-items: center; gap: .6rem;
-    padding: .7rem 1rem; border-bottom: 1px solid var(--border);
-    background: var(--bg); flex: none;
+    display: flex; align-items: center; gap: .85rem; flex: none;
+    padding: .8rem 1.75rem .85rem; border-bottom: 1px solid var(--rule);
+    background: var(--surface);
   }
   .back {
-    display: none; flex: none; width: 30px; height: 30px; padding: 0;
+    display: none; flex: none; width: 1.9rem; height: 1.9rem; padding: 0;
     align-items: center; justify-content: center;
-    border-radius: 8px; border: 1px solid var(--border); background: var(--card);
+    border-radius: 2px; border: 1px solid var(--rule); background: var(--bg);
     color: var(--fg); cursor: pointer;
   }
-  .back svg { width: 15px; height: 15px; }
-  .thread-title { font-size: .95rem; font-weight: 600; letter-spacing: -.01em; margin: 0;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .thread-sub { font-size: .74rem; color: var(--muted); margin-top: .05rem; }
+  .back:hover { background: var(--raised); }
+  .back svg { width: 14px; height: 14px; }
+  .thread-title {
+    font-family: var(--font-display); font-size: 1.14rem; font-weight: 600;
+    letter-spacing: -.015em; line-height: 1.2; margin: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .thread-sub { margin-top: .28rem; }
   .thread-headtext { min-width: 0; }
 
   .scroller { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; }
-  .messages { max-width: 46rem; margin: 0 auto; padding: 1rem 1.25rem 1.25rem; }
+  .messages {
+    max-width: calc(var(--gutter) + var(--measure) + 8.5rem + 2.8rem);
+    margin: 0 auto; padding: .6rem 1.75rem 2.4rem;
+  }
+  .messages.settle { animation: settle .34s ease both; }
 
-  .top-state { display: grid; place-items: center; padding: .9rem 0 .3rem; min-height: 1rem; }
+  .top-state { display: grid; place-items: center; padding: 1rem 0 .5rem; min-height: 1.1rem; }
   .spinner {
-    width: 16px; height: 16px; border-radius: 50%;
-    border: 2px solid var(--border); border-top-color: var(--accent);
-    animation: spin .7s linear infinite;
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 1.5px solid var(--rule); border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .top-note { font-size: .74rem; color: var(--muted); }
+  .top-note { text-align: center; }
 
+  /* Date as a running head: label left, hairline running out to the margin. */
   .day {
-    display: flex; align-items: center; gap: .75rem;
-    margin: 1.35rem 0 .9rem;
+    display: flex; align-items: center; gap: .8rem;
+    margin: 2rem 0 .95rem; padding-left: var(--gutter);
   }
-  .day::before, .day::after { content: ""; height: 1px; background: var(--border); flex: 1; }
-  .day span { font-size: .72rem; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+  .day:first-child { margin-top: .5rem; }
+  .day::after { content: ""; height: 1px; background: var(--rule); flex: 1; }
+  .day span { white-space: nowrap; }
 
   .sys {
-    text-align: center; font-size: .76rem; color: var(--muted);
-    margin: .8rem auto; max-width: 30rem; line-height: 1.5;
+    display: flex; gap: .65rem; margin: 1rem 0; padding-left: var(--gutter);
+    max-width: calc(var(--gutter) + var(--measure));
+    font-size: .79rem; line-height: 1.55; color: var(--fg-soft); font-style: italic;
+  }
+  .sys::before { content: "—"; font-style: normal; opacity: .5; flex: none; }
+
+  /* ---------- entries ---------- */
+
+  /* Three columns: plate/time gutter, the reading measure, and a true right
+     margin that reactions live in as marginalia. */
+  .entry {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--gutter) minmax(0, var(--measure)) minmax(0, 8.5rem);
+    grid-template-areas: "gutter body marks";
+    column-gap: 1.4rem;
+    margin-top: 1.1rem;
+  }
+  .entry.cont { margin-top: .28rem; }
+  .entry-gutter { grid-area: gutter; display: flex; justify-content: flex-end; }
+  .entry-body { grid-area: body; min-width: 0; }
+  .entry-marks { grid-area: marks; padding-top: .2rem; }
+
+  /* A change bar in the far margin marks your own lines. It runs unbroken
+     through a run, the way a revision bar spans a whole passage. */
+  .entry.mine::before {
+    content: ""; position: absolute; left: 0; top: .1rem; bottom: .1rem;
+    width: 2px; background: var(--accent);
+  }
+  .entry.mine.cont::before { top: -.38rem; }   /* overlaps the bar above it */
+  .entry.mine .byline-name { color: var(--accent); }
+
+  .byline { display: flex; align-items: baseline; gap: .6rem; margin-bottom: .2rem; }
+  .byline-name {
+    font-family: var(--font-label); font-size: .695rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--fg); overflow-wrap: anywhere;
+  }
+  .byline-time {
+    font-family: var(--font-mono); font-size: .635rem; color: var(--fg-soft);
+    font-variant-numeric: tabular-nums; flex: none;
   }
 
-  .msg { display: flex; gap: .6rem; margin-top: .7rem; align-items: flex-start; }
-  .msg.cont { margin-top: .12rem; }
-  .msg .gutter { width: 30px; flex: none; }
-  .msg-body { min-width: 0; max-width: 34rem; }
-  .msg-meta { display: flex; align-items: baseline; gap: .45rem; margin-bottom: .12rem; }
-  .msg-name { font-size: .8rem; font-weight: 600; letter-spacing: -.005em; }
-  .msg-time { font-size: .7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Continuation lines keep the time in the gutter, on hover only. */
+  .gutter-time {
+    font-family: var(--font-mono); font-size: .635rem; color: var(--fg-soft);
+    font-variant-numeric: tabular-nums; text-align: right; width: 100%;
+    opacity: 0; transition: opacity .12s ease;
+  }
+  .entry:hover .gutter-time, .entry:focus-within .gutter-time { opacity: 1; }
 
-  .bubble {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 14px; padding: .42rem .68rem;
-    font-size: .9rem; line-height: 1.5;
+  .text {
+    font-size: .945rem; line-height: 1.62;
     white-space: pre-wrap; overflow-wrap: anywhere;
     -webkit-user-select: text; user-select: text;
-    box-shadow: var(--shadow);
   }
-  .bubble.tomb { font-style: italic; color: var(--muted); background: transparent; border-style: dashed; }
-  .edited { font-size: .7rem; color: var(--muted); margin-left: .3rem; font-style: normal; }
+  .text.tomb { font-style: italic; color: var(--fg-soft); font-size: .88rem; }
+  .edited {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--fg-soft); font-style: normal;
+    margin-left: .5rem; white-space: nowrap;
+  }
 
-  .msg.mine { flex-direction: row-reverse; }
-  .msg.mine .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
-  .msg.mine .msg-meta { flex-direction: row-reverse; }
-  .msg.mine .bubble { background: var(--mine-bg); border-color: var(--mine-bg); color: var(--mine-fg); }
-  .msg.mine .bubble.tomb { background: transparent; color: var(--muted); border-color: var(--border); }
-  .msg.mine .edited { color: rgba(255, 255, 255, .7); }
-  .msg.mine .quote { border-left-color: rgba(255, 255, 255, .4); }
-
+  /* Replies read as quotations, not as nested chat. */
   .quote {
-    border-left: 3px solid var(--border); padding: .1rem 0 .1rem .55rem;
-    margin-bottom: .3rem; font-size: .78rem; color: var(--muted); line-height: 1.45;
+    border-left: 1px solid var(--rule);
+    padding: .05rem 0 .05rem .85rem; margin: .1rem 0 .5rem;
     max-width: 100%; overflow: hidden;
   }
-  .quote b { font-weight: 600; color: var(--fg); font-size: .76rem; display: block; }
-  .msg.mine .quote, .msg.mine .quote b { color: rgba(255, 255, 255, .82); }
-  .quote-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .quote-who {
+    display: block; margin-bottom: .08rem;
+    font-family: var(--font-label); font-size: .575rem; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--fg-soft);
+  }
+  .quote-text {
+    font-family: var(--font-display); font-style: italic; font-size: .875rem;
+    line-height: 1.5; color: var(--fg-soft);
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
 
-  .atts { display: flex; flex-direction: column; gap: .35rem; margin-top: .3rem; }
-  .msg-body > .atts:first-child { margin-top: 0; }
+  .atts { display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-top: .5rem; }
+  .entry-body > .atts:first-child { margin-top: .1rem; }
   .att-img {
-    display: block; max-width: min(320px, 100%); max-height: 340px;
-    border-radius: 12px; border: 1px solid var(--border); background: var(--card);
+    display: block; max-width: min(30rem, 100%); max-height: 22rem;
+    border-radius: 2px; border: 1px solid var(--rule); background: var(--raised);
   }
   .att-miss {
-    display: flex; align-items: center; gap: .55rem;
-    max-width: 320px; padding: .7rem .8rem;
-    border: 1px dashed var(--border); border-radius: 12px;
-    color: var(--muted); font-size: .78rem; line-height: 1.4; background: var(--card);
-  }
-  .att-miss svg { width: 18px; height: 18px; flex: none; }
-
-  .reacts { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .3rem; }
-  .react {
-    display: inline-flex; align-items: center; gap: .25rem;
-    font-size: .74rem; line-height: 1; padding: .2rem .4rem;
-    border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--muted);
-  }
-  .react .glyph { font-size: .82rem; }
-  .msg.mine .reacts { justify-content: flex-end; }
-
-  /* ---------- composer (permanently disabled) ---------- */
-
-  .composer { flex: none; border-top: 1px solid var(--border); padding: .7rem 1.25rem .85rem; background: var(--bg); }
-  .composer-inner { max-width: 46rem; margin: 0 auto; }
-  .composer-box {
     display: flex; align-items: center; gap: .6rem;
-    border: 1px solid var(--border); border-radius: 12px;
-    background: var(--card); padding: .45rem .5rem .45rem .75rem;
-    opacity: .65;
+    max-width: 100%; padding: .5rem .7rem;
+    border: 1px solid var(--rule); border-radius: 2px; background: var(--surface);
+    color: var(--fg-soft); font-size: .765rem; line-height: 1.45;
   }
-  .composer-box input {
-    flex: 1; min-width: 0; font: inherit; font-size: .875rem;
-    border: 0; background: none; color: var(--fg); cursor: not-allowed;
-  }
-  .composer-box input::placeholder { color: var(--muted); }
-  .composer-box input:focus { outline: none; }
-  .send {
-    flex: none; width: 30px; height: 30px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
-    display: grid; place-items: center; cursor: not-allowed;
-  }
-  .send svg { width: 15px; height: 15px; }
-  .composer-note {
-    display: flex; align-items: center; gap: .4rem;
-    margin-top: .45rem; font-size: .76rem; color: var(--muted);
-  }
-  .composer-note .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+  .att-miss svg { width: 15px; height: 15px; flex: none; opacity: .75; }
 
-  /* ---------- empty state ---------- */
+  /* Reactions: a footnote in the margin, not a row of buttons. */
+  .marks { display: flex; flex-wrap: wrap; gap: .35rem .7rem; }
+  .note-mark {
+    display: inline-flex; align-items: baseline; gap: .3rem;
+    font-family: var(--font-mono); font-size: .68rem; color: var(--fg-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  .note-mark .glyph { font-family: var(--font-ui); font-size: .84rem; line-height: 1; }
 
-  .empty { flex: 1; display: grid; place-items: center; padding: 2rem; }
-  .empty.hide { display: none; }
-  .empty-inner { max-width: 26rem; text-align: center; }
-  .empty .mark { width: 60px; height: 60px; border-radius: 18px; margin: 0 auto 1.15rem; }
-  .empty .mark svg { width: 30px; height: 30px; }
-  .empty h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: -.01em; margin: 0 0 .4rem; }
-  .empty p { margin: 0 0 .5rem; color: var(--muted); font-size: .875rem; line-height: 1.6; }
-  .empty .fine { font-size: .8rem; }
+  /* ---------- colophon (states the read-only boundary) ---------- */
+
+  .colophon { flex: none; border-top: 1px solid var(--rule); background: var(--surface); padding: .65rem 1.75rem .7rem; }
+  .colophon-inner {
+    display: flex; align-items: center; gap: .75rem;
+    max-width: calc(var(--gutter) + var(--measure) + 8.5rem + 2.8rem); margin: 0 auto;
+  }
+  .colophon .sep { flex: 1; height: 1px; background: var(--rule); min-width: .5rem; }
+  .colophon .note {
+    font-size: .765rem; color: var(--fg-soft);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---------- frontispiece (nothing selected) ---------- */
+
+  .frontis { flex: 1; display: grid; align-content: center; padding: 2.5rem 1.75rem; overflow-y: auto; }
+  .frontis.hide { display: none; }
+  /* Centred on the same axis as the reading column, so nothing shifts sideways
+     when a conversation opens. */
+  .frontis-inner { max-width: 36rem; margin: 0 auto; }
+  .frontis .kicker { display: block; margin-bottom: .85rem; }
+  .frontis h1 {
+    font-family: var(--font-display); font-size: 2rem; font-weight: 600;
+    line-height: 1.16; letter-spacing: -.02em; margin: 0 0 .85rem; max-width: 26rem;
+  }
+  .frontis .lede { font-size: .95rem; line-height: 1.65; color: var(--fg-soft); margin: 0; max-width: 30rem; }
+  .double-rule { height: 3px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin: 1.4rem 0 1.25rem; }
+  .figures { display: flex; flex-wrap: wrap; gap: 1rem 2.4rem; margin-bottom: 1.4rem; }
+  .figures:empty { display: none; }
+  .figure .n {
+    display: block; font-family: var(--font-mono); font-size: 1.3rem; line-height: 1.15;
+    letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-bottom: .3rem;
+  }
+  .frontis .fine { font-size: .82rem; line-height: 1.7; color: var(--fg-soft); margin: 0; max-width: 30rem; }
+
+  /* ---------- one orchestrated reveal ---------- */
+
+  @keyframes rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+  @keyframes settle { from { opacity: 0; } to { opacity: 1; } }
+  .reveal { animation: rise .5s cubic-bezier(.2, .7, .3, 1) both; animation-delay: calc(var(--i, 0) * 45ms); }
 
   /* ---------- responsive ---------- */
 
-  @media (max-width: 700px) {
-    .app { grid-template-columns: 1fr; }
-    .main { display: none; }
-    .app.thread-open .sidebar { display: none; }
-    .app.thread-open .main { display: flex; }
+  /* Below this the right margin stops being a margin: reactions drop under. */
+  @media (max-width: 62rem) {
+    .entry {
+      grid-template-columns: var(--gutter) minmax(0, 1fr);
+      grid-template-areas: "gutter body" "gutter marks";
+    }
+    .entry-marks { padding-top: .4rem; }
+    .messages, .colophon-inner { max-width: calc(var(--gutter) + var(--measure) + 1.4rem); }
+  }
+
+  @media (max-width: 44rem) {
+    :root { --gutter: 2.9rem; }
+    .app { grid-template-columns: minmax(0, 1fr); }
+    .reader { display: none; }
+    .app.thread-open .index { display: none; }
+    .app.thread-open .reader { display: flex; }
     .back { display: inline-flex; }
-    .messages { padding: .85rem .9rem 1rem; }
-    .composer { padding: .6rem .9rem .75rem; }
+    .masthead, .thread-head, .colophon { padding-left: 1.05rem; padding-right: 1.05rem; }
+    .messages { padding: .5rem 1.05rem 1.8rem; }
+    .frontis { padding: 1.75rem 1.05rem; }
+    .frontis h1 { font-size: 1.7rem; }
+    .index-head, .row, .list-head, .index-foot, .list-empty { padding-left: 1.05rem; padding-right: 1.05rem; }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spinner { animation: none; border-top-color: var(--border); }
+    .spinner { animation: none; border-top-color: var(--rule); }
+    .reveal, .messages.settle { animation: none !important; }
+    .gutter-time { transition: none; opacity: 1; }
     * { scroll-behavior: auto !important; }
   }
 </style>
 
 <div class="app" id="app">
-  <aside class="sidebar" id="sidebar">
-    <div class="side-head">
-      <div class="brand">
-        <div class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/>
-          </svg>
-        </div>
-        <div class="brand-name">Archive</div>
-        <div class="pill" title="No connection — showing saved messages">
-          <span class="dot"></span>Offline
-        </div>
-      </div>
-      <div class="search">
+  <header class="masthead reveal" style="--i: 0">
+    <div>
+      <div class="kicker">The local record</div>
+      <div class="masthead-title">The Archive<span class="thin"> · offline reader</span></div>
+    </div>
+    <!-- Standing note, not an alarm: the beacon is --ok, because for an archive
+         this is the normal operating condition rather than a failure. -->
+    <div class="standing" title="No connection — reading the messages saved on this computer">
+      <span class="beacon" aria-hidden="true"></span>
+      <span class="kicker">Offline · reading from disk</span>
+    </div>
+  </header>
+
+  <aside class="index reveal" id="sidebar" style="--i: 1">
+    <div class="index-head">
+      <div class="field">
+        <label class="kicker" for="q">Search the archive</label>
+        <input type="search" id="q" placeholder="A word, a name, a year"
+               aria-label="Search the archive" autocomplete="off" spellcheck="false" />
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>
         </svg>
-        <input type="search" id="q" placeholder="Search archive" aria-label="Search archived messages"
-               autocomplete="off" spellcheck="false" />
       </div>
     </div>
     <div class="list" id="list"></div>
-    <div class="side-foot" id="stats">Reading local archive…</div>
+    <div class="index-foot" id="stats"><div class="kicker">Reading local archive…</div></div>
   </aside>
 
-  <main class="main" id="main">
-    <div class="empty" id="empty">
-      <div class="empty-inner">
-        <div class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/>
-          </svg>
-        </div>
-        <h1>Your conversations, saved</h1>
-        <p>You're offline, so this is the copy of your history kept on this computer. Pick a conversation to read it.</p>
-        <p class="fine">Nothing here can be sent, edited, or deleted. Sending picks back up the moment you're connected again.</p>
+  <main class="reader" id="main">
+    <div class="frontis" id="empty">
+      <div class="frontis-inner">
+        <span class="kicker reveal" style="--i: 2">Offline · local copy · read only</span>
+        <h1 class="reveal" id="frontisTitle" style="--i: 3">Your conversations, kept where you can still read them.</h1>
+        <p class="lede reveal" id="frontisLede" style="--i: 4">The connection is gone; the record is not. This
+          window reads the copy stored on this computer — every conversation that has finished syncing, in
+          full, at reading speed.</p>
+        <div class="double-rule reveal" style="--i: 5" aria-hidden="true"></div>
+        <div class="figures reveal" id="figures" style="--i: 6"></div>
+        <p class="fine reveal" id="frontisFine" style="--i: 7">Choose a conversation from the index, or press <kbd>/</kbd> to
+          search every message at once. Nothing here can be sent, edited, or deleted — this surface only
+          reads. Sending picks back up the moment you are connected again.</p>
       </div>
     </div>
 
@@ -368,7 +490,7 @@
         </button>
         <div class="thread-headtext">
           <h1 class="thread-title" id="tTitle"></h1>
-          <div class="thread-sub" id="tSub"></div>
+          <div class="thread-sub kicker" id="tSub"></div>
         </div>
       </header>
 
@@ -378,22 +500,18 @@
       </div>
 
       <!--
-        Disabled by construction, not by state: no submit handler, no form, no
-        send command exists in the IPC surface this page can reach.
+        Read-only by construction, not by state: there is no input, no form, no
+        submit handler, and no send command in the IPC surface this page can
+        reach. The colophon says so rather than showing a disabled box.
       -->
-      <div class="composer">
-        <div class="composer-inner">
-          <div class="composer-box">
-            <input type="text" disabled readonly aria-disabled="true" tabindex="-1"
-                   placeholder="Sending is unavailable offline" aria-label="Message box, disabled while offline" />
-            <span class="send" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h14m-6-6 6 6-6 6"/></svg>
-            </span>
-          </div>
-          <div class="composer-note"><span class="dot"></span>You're offline — messages can't be sent.</div>
+      <footer class="colophon">
+        <div class="colophon-inner">
+          <span class="beacon" aria-hidden="true"></span>
+          <span class="kicker">Read only</span>
+          <span class="sep" aria-hidden="true"></span>
+          <span class="note">The archived copy. Sending resumes with the connection.</span>
         </div>
-      </div>
+      </footer>
     </div>
   </main>
 </div>
@@ -586,17 +704,29 @@
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   }
 
-  var HUES = ["#3c16d3", "#0d7a5f", "#a3341f", "#1d5fa8", "#7a2a8c", "#8a5a10", "#0f6f86", "#a02a5c"];
-  function tintFor(seed) {
-    var s = String(seed || ""), h = 0;
-    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    return HUES[h % HUES.length];
+  // Text nodes plus <mark> elements — never innerHTML. The query is untrusted
+  // and so is the message text; both stay data.
+  function highlight(node, text, query) {
+    var s = String(text == null ? "" : text).replace(/\s+/g, " ");
+    var q = String(query || "");
+    if (!q) { node.textContent = s; return node; }
+    var hay = s.toLowerCase(), needle = q.toLowerCase(), from = 0, hits = 0;
+    for (;;) {
+      var at = hay.indexOf(needle, from);
+      if (at < 0 || hits >= 20) break;
+      if (at > from) node.appendChild(document.createTextNode(s.slice(from, at)));
+      node.appendChild(el("mark", null, s.slice(at, at + needle.length)));
+      from = at + needle.length;
+      hits++;
+    }
+    if (from < s.length) node.appendChild(document.createTextNode(s.slice(from)));
+    return node;
   }
 
-  // Avatars come back as remote URLs; only a cached local copy may be shown.
-  function makeAvatar(name, url, seed, cls) {
-    var node = el("div", "avatar" + (cls ? " " + cls : ""), initials(name));
-    node.style.background = tintFor(seed || name);
+  // Avatars come back as remote URLs; only a cached local copy may be shown. The
+  // plate is deliberately uniform: recognition comes from the name, not a colour.
+  function makeAvatar(name, url, cls) {
+    var node = el("div", "plate" + (cls ? " " + cls : ""), initials(name));
     node.setAttribute("aria-hidden", "true");
     if (url) {
       resolveMedia(url).then(function (path) {
@@ -628,7 +758,7 @@
     return pending;
   }
 
-  /* ---------------- sidebar ---------------- */
+  /* ---------------- index column ---------------- */
 
   async function loadConversations() {
     var rows = await call("archive_conversations");
@@ -636,16 +766,47 @@
     state.byId = {};
     state.convos.forEach(function (c) { state.byId[c.id] = c; });
     renderConversations();
+    // With nothing archived, "pick a conversation" is a lie. Say what is true.
+    if (!state.convos.length) {
+      $("frontisTitle").textContent = "There is nothing archived on this computer yet.";
+      $("frontisLede").textContent = "The record starts the first time a sync finishes. After that every " +
+        "conversation is written here and stays readable — with the network or without it.";
+      $("frontisFine").textContent = "The archive fills itself in the background whenever you are connected. " +
+        "Nothing here can be sent, edited, or deleted — this surface only reads.";
+    }
+  }
+
+  // One orchestrated entrance. Capped, or a 211-row index would crawl in.
+  function reveal(node, i) {
+    node.classList.add("reveal");
+    node.style.setProperty("--i", String(Math.min(i, 10) + 2));
+    return node;
+  }
+
+  function listHead(text) {
+    var h = el("div", "list-head");
+    h.appendChild(el("span", "kicker", text));
+    return h;
+  }
+
+  function listEmpty(title, body) {
+    var box = el("div", "list-empty");
+    box.appendChild(el("strong", null, title));
+    box.appendChild(document.createTextNode(body));
+    return box;
   }
 
   function renderConversations() {
     listEl.textContent = "";
     if (!state.convos.length) {
-      listEl.appendChild(el("div", "side-empty", "No conversations have been archived yet."));
+      listEl.appendChild(listEmpty("The index is empty",
+        "Nothing has finished syncing to this computer yet. Conversations are listed here as soon as a sync completes."));
       return;
     }
-    state.convos.forEach(function (c) {
-      listEl.appendChild(convoRow(c));
+    listEl.appendChild(listHead(state.convos.length === 1
+      ? "1 conversation" : state.convos.length.toLocaleString() + " conversations"));
+    state.convos.forEach(function (c, i) {
+      listEl.appendChild(reveal(convoRow(c), i));
     });
   }
 
@@ -656,8 +817,8 @@
     if (state.active === c.id) row.classList.add("active");
     row.dataset.cid = c.id;
 
-    row.appendChild(makeAvatar(name, pick(c, "image_url", "imageUrl"), c.id,
-      c.kind === "group" ? "square" : null));
+    row.appendChild(makeAvatar(name, pick(c, "image_url", "imageUrl"),
+      c.kind === "group" ? null : "portrait"));
 
     var body = el("div", "row-body");
     var top = el("div", "row-top");
@@ -674,18 +835,21 @@
     return row;
   }
 
+  // Results are set as an index: a running number, the conversation it belongs
+  // to, its byline, and the line itself with the term marked.
   function renderSearchResults(hits, query) {
     listEl.textContent = "";
-    var label = el("div", "list-label",
-      hits.length ? hits.length + (hits.length === 1 ? " result" : " results") : "No results");
-    listEl.appendChild(label);
+    listEl.appendChild(listHead(hits.length
+      ? (hits.length === 1 ? "1 entry" : hits.length.toLocaleString() + " entries")
+      : "No entries"));
 
     if (!hits.length) {
-      listEl.appendChild(el("div", "side-empty", "Nothing in the archive matches “" + query + "”."));
+      listEl.appendChild(listEmpty("Nothing matches",
+        "No archived message contains “" + query + "”. Only what has already synced to this computer can be searched."));
       return;
     }
 
-    hits.forEach(function (h) {
+    hits.forEach(function (h, i) {
       var cid = pick(h, "conversation_id", "conversationId");
       var cname = pick(h, "conversation_name", "conversationName") ||
         (state.byId[cid] && state.byId[cid].name) || "Conversation";
@@ -694,45 +858,63 @@
 
       var row = el("button", "row");
       row.type = "button";
-      row.appendChild(makeAvatar(sender, null, sender, "sm"));
+      row.appendChild(el("div", "ord", (i < 9 ? "0" : "") + (i + 1)));
 
       var body = el("div", "row-body");
       var top = el("div", "row-top");
       top.appendChild(el("div", "row-name", cname));
       top.appendChild(el("div", "row-time", relTime(when)));
       body.appendChild(top);
-      body.appendChild(el("div", "row-prev", sender + ": " + String(h.text || "").replace(/\s+/g, " ")));
+      body.appendChild(el("span", "kicker row-src", sender));
+      body.appendChild(highlight(el("div", "row-quote"), h.text, query));
       row.appendChild(body);
 
       row.addEventListener("click", function () { if (cid) openConversation(cid); });
-      listEl.appendChild(row);
+      listEl.appendChild(reveal(row, i));
     });
   }
 
+  // "2h ago" reads right; "Yesterday ago" does not.
+  function syncPhrase(synced, terse) {
+    if (!synced) return terse ? "Never" : "Never synced";
+    var r = relTime(synced);
+    var v = r === "now" ? (terse ? "Just now" : "just now")
+      : /^\d+[mh]$/.test(r) ? r + " ago"
+      : r;
+    return terse ? v : "Synced " + v;
+  }
+
+  function figure(value, label) {
+    var f = el("div", "figure");
+    f.appendChild(el("span", "n", value));
+    f.appendChild(el("span", "kicker", label));
+    return f;
+  }
+
+  // Counts, and only counts, are numbers here — message and conversation ids
+  // stay strings everywhere they are read or passed back to Rust.
   async function loadStats() {
+    var foot = $("stats"), figs = $("figures");
     var s = await call("archive_stats");
-    if (!s) { $("stats").textContent = "Local archive"; return; }
+    foot.textContent = "";
+    figs.textContent = "";
+    if (!s) { foot.appendChild(el("div", "kicker", "Local archive")); return; }
+
     var msgs = Number(pick(s, "messages") || 0);
     var convs = Number(pick(s, "conversations") || 0);
     var synced = pick(s, "last_sync_at", "lastSyncAt");
     var account = pick(s, "account_name", "accountName");
     state.accountName = account || null;
 
-    var bits = [];
-    bits.push(msgs.toLocaleString() + (msgs === 1 ? " message" : " messages"));
-    bits.push(convs.toLocaleString() + (convs === 1 ? " conversation" : " conversations"));
-    // "synced 2h ago" reads right; "synced Yesterday ago" does not.
-    if (!synced) {
-      bits.push("never synced");
-    } else {
-      var r = relTime(synced);
-      bits.push(r === "now" ? "synced just now"
-        : /^\d+[mh]$/.test(r) ? "synced " + r + " ago"
-        : "synced " + r);
-    }
-    var foot = $("stats");
-    foot.textContent = bits.join(" · ");
+    foot.appendChild(el("div", "figures-line",
+      msgs.toLocaleString() + (msgs === 1 ? " message · " : " messages · ") +
+      convs.toLocaleString() + (convs === 1 ? " conversation" : " conversations")));
+    foot.appendChild(el("div", "kicker", syncPhrase(synced, false)));
     foot.title = account ? "Signed in as " + account : "";
+
+    figs.appendChild(figure(msgs.toLocaleString(), msgs === 1 ? "Message kept" : "Messages kept"));
+    figs.appendChild(figure(convs.toLocaleString(), convs === 1 ? "Conversation" : "Conversations"));
+    figs.appendChild(figure(syncPhrase(synced, true), "Last sync"));
   }
 
   /* ---------------- thread ---------------- */
@@ -754,8 +936,13 @@
     var name = (c && c.name) || (c && c.kind === "dm" ? "Direct message" : "Conversation");
     $("tTitle").textContent = name;
     var count = c ? Number(pick(c, "messages_count", "messagesCount") || 0) : 0;
-    $("tSub").textContent = (count ? count.toLocaleString() + (count === 1 ? " message" : " messages") + " · " : "") +
-      "Archived copy · read-only";
+    var sub = $("tSub");
+    sub.textContent = "";
+    if (count) {
+      sub.appendChild(el("span", "num", count.toLocaleString()));
+      sub.appendChild(document.createTextNode((count === 1 ? " message · " : " messages · ")));
+    }
+    sub.appendChild(document.createTextNode("Archived copy · read only"));
 
     msgsEl.textContent = "";
     setTop("spinner");
@@ -772,6 +959,11 @@
     render();
     scroller.scrollTop = scroller.scrollHeight;
     setTop(state.hasMore ? "" : "start");
+
+    // The thread settles in once, as a page. Restart it on every switch.
+    msgsEl.classList.remove("settle");
+    void msgsEl.offsetWidth;
+    msgsEl.classList.add("settle");
   }
 
   // Pages arrive newest-first; the log reads oldest-first.
@@ -833,9 +1025,9 @@
       s.setAttribute("aria-label", "Loading earlier messages");
       topState.appendChild(s);
     } else if (kind === "start") {
-      topState.appendChild(el("div", "top-note", "Beginning of the archived history"));
+      topState.appendChild(el("div", "top-note kicker", "Beginning of the archived history"));
     } else if (kind === "error") {
-      topState.appendChild(el("div", "top-note", "Couldn't load earlier messages from the archive"));
+      topState.appendChild(el("div", "top-note kicker", "Couldn't load earlier messages from the archive"));
     }
   }
 
@@ -859,7 +1051,7 @@
       var key = d ? startOfDay(d) : null;
       if (key !== null && key !== lastDay) {
         var sep = el("div", "day");
-        sep.appendChild(el("span", null, dayLabel(pick(m, "created_at", "createdAt"))));
+        sep.appendChild(el("span", "kicker", dayLabel(pick(m, "created_at", "createdAt"))));
         frag.appendChild(sep);
         lastDay = key;
         prev = null;
@@ -928,20 +1120,25 @@
 
   function renderMessage(m, cont) {
     var mine = isMine(m);
-    var wrap = el("div", "msg" + (cont ? " cont" : "") + (mine ? " mine" : ""));
+    var wrap = el("div", "entry" + (cont ? " cont" : "") + (mine ? " mine" : ""));
+    var stamp = pick(m, "created_at", "createdAt");
 
-    if (cont || mine) {
-      wrap.appendChild(el("div", "gutter"));
+    // The gutter carries the plate that opens a run, then the time of each
+    // later line in the same run — quiet, right up against the text column.
+    var gutter = el("div", "entry-gutter");
+    if (cont) {
+      gutter.appendChild(el("div", "gutter-time", clockTime(stamp)));
     } else {
-      wrap.appendChild(makeAvatar(m.name, pick(m, "avatar_url", "avatarUrl"), m.user_id || m.name, "sm"));
+      gutter.appendChild(makeAvatar(m.name, pick(m, "avatar_url", "avatarUrl"), "sm portrait"));
     }
+    wrap.appendChild(gutter);
 
-    var body = el("div", "msg-body");
+    var body = el("div", "entry-body");
 
     if (!cont) {
-      var meta = el("div", "msg-meta");
-      meta.appendChild(el("span", "msg-name", m.name || "Unknown"));
-      meta.appendChild(el("span", "msg-time", clockTime(pick(m, "created_at", "createdAt"))));
+      var meta = el("div", "byline");
+      meta.appendChild(el("span", "byline-name", m.name || "Unknown"));
+      meta.appendChild(el("span", "byline-time", clockTime(stamp)));
       body.appendChild(meta);
     }
 
@@ -951,29 +1148,31 @@
     if (reply) body.appendChild(renderQuote(reply));
 
     if (isDeleted(m)) {
-      body.appendChild(el("div", "bubble tomb", "This message was deleted"));
+      body.appendChild(el("div", "text tomb", "This message was deleted"));
     } else {
       var text = m.text;
       if (text != null && String(text).length) {
-        var b = el("div", "bubble", String(text));
-        if (isEdited(m)) b.appendChild(el("span", "edited", "(edited)"));
+        var b = el("div", "text", String(text));
+        if (isEdited(m)) b.appendChild(el("span", "edited", "edited"));
         body.appendChild(b);
       }
       var media = atts.filter(function (a) { return a && a.type !== "reply" && a.type !== "emoji" && a.type !== "mentions"; });
       if (media.length) body.appendChild(renderAttachments(media));
-      // Attachment-only messages get no empty bubble; if the row carries neither
+      // Attachment-only messages get no empty line; if the row carries neither
       // text nor a renderable attachment, say so rather than render a void.
       if ((text == null || !String(text).length) && !media.length) {
-        var ph = el("div", "bubble tomb", "No content in the archive for this message");
-        if (isEdited(m)) ph.appendChild(el("span", "edited", "(edited)"));
+        var ph = el("div", "text tomb", "No content in the archive for this message");
+        if (isEdited(m)) ph.appendChild(el("span", "edited", "edited"));
         body.appendChild(ph);
       }
     }
 
-    var reacts = renderReactions(m.reactions);
-    if (reacts) body.appendChild(reacts);
-
     wrap.appendChild(body);
+
+    // Reactions are set in the right margin, as marginalia on the line.
+    var reacts = renderReactions(m.reactions);
+    if (reacts) wrap.appendChild(reacts);
+
     return wrap;
   }
 
@@ -981,7 +1180,8 @@
     var q = el("div", "quote");
     var refId = pick(a, "reply_id", "replyId") || pick(a, "base_reply_id", "baseReplyId");
     var ref = refId == null ? null : (state.msgById.get(String(refId)) || null);
-    q.appendChild(el("b", null, ref && ref.name ? ref.name : "Replying to an earlier message"));
+    q.appendChild(el("span", "quote-who",
+      ref && ref.name ? "In reply to " + ref.name : "In reply to an earlier message"));
     var t = ref && !isDeleted(ref) ? ref.text : null;
     q.appendChild(el("div", "quote-text",
       t ? String(t).replace(/\s+/g, " ") : "The quoted message isn't in this part of the archive"));
@@ -1059,22 +1259,22 @@
 
   function renderReactions(list) {
     if (!Array.isArray(list) || !list.length) return null;
-    var box = el("div", "reacts");
+    var box = el("div", "entry-marks marks");
     var any = false;
     list.forEach(function (r) {
       if (!r) return;
       var users = Array.isArray(pick(r, "user_ids", "userIds")) ? pick(r, "user_ids", "userIds") : [];
       var count = users.length || Number(r.count) || 1;
-      var chip = el("span", "react");
+      var note = el("span", "note-mark");
       if (r.type === "unicode" && r.code) {
-        chip.appendChild(el("span", "glyph", String(r.code)));
+        note.appendChild(el("span", "glyph", String(r.code)));
       } else {
         // Emoji-pack reactions have no Unicode character to render offline.
-        chip.appendChild(el("span", "glyph", "◍"));
-        chip.title = "Reaction from the GroupMe emoji pack";
+        note.appendChild(el("span", "glyph", "◍"));
+        note.title = "Reaction from the GroupMe emoji pack";
       }
-      chip.appendChild(el("span", null, String(count)));
-      box.appendChild(chip);
+      note.appendChild(el("span", null, String(count)));
+      box.appendChild(note);
       any = true;
     });
     return any ? box : null;

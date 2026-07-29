@@ -10,9 +10,10 @@
   is usually created in the same breath as the check: a check that resolves first
   would land on nobody and leave this panel spinning forever.
 
-  Deliberately self-contained: no CDN, no fonts, no build step, matching
-  index.html. Every dynamic value is written with textContent — release notes and
-  error strings come off a remote manifest and are untrusted input.
+  Deliberately self-contained: no CDN, no downloaded fonts, no build step, matching
+  index.html — every face named here ships with Windows. Every dynamic value is
+  written with textContent — release notes and error strings come off a remote
+  manifest and are untrusted input.
 -->
 <!doctype html>
 <meta charset="utf-8" />
@@ -22,24 +23,23 @@
 <style>
   :root {
     color-scheme: light dark;
-    --accent: #3c16d3;
-    --bg: #ffffff;
-    --fg: #16161d;
-    --muted: #6b6b7b;
-    --card: #f5f5f8;
-    --border: #e3e3ea;
-    --ok: #16794a;
-    --danger: #b3243a;
+
+    --font-display: "Sitka Heading", Constantia, Georgia, serif;
+    --font-ui:      Corbel, Candara, "Segoe UI", sans-serif;
+    --font-label:   "Bahnschrift SemiLight", Bahnschrift, Corbel, sans-serif;
+    --font-mono:    "Cascadia Mono", Consolas, monospace;
+
+    --bg: #f6f3ec; --surface: #fffdf8; --raised: #ece7db;
+    --rule: #dcd5c6; --fg: #16130d; --fg-soft: #5d5647;
+    --accent: #a8341f; --accent-soft: #f2e3dc;
+    --ok: #1f5c56; --warn: #8a5a00;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e0e14;
-      --fg: #f2f2f6;
-      --muted: #9a9aab;
-      --card: #191922;
-      --border: #2a2a36;
-      --ok: #45c98a;
-      --danger: #f2707d;
+      --bg: #100e0c; --surface: #191611; --raised: #221e18;
+      --rule: #302a22; --fg: #f1ece1; --fg-soft: #9d9483;
+      --accent: #e2603f; --accent-soft: #33211b;
+      --ok: #4fb3a4; --warn: #d4a24c;
     }
   }
   * { box-sizing: border-box; }
@@ -47,10 +47,10 @@
   body {
     background: var(--bg);
     color: var(--fg);
-    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    font: 15px/1.55 var(--font-ui);
     /* The window is frameless, so the 1px border is the only thing separating
        the dialog from whatever is behind it. */
-    border: 1px solid var(--border);
+    border: 1px solid var(--rule);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -63,45 +63,73 @@
     display: flex;
     align-items: center;
     gap: .625rem;
-    padding: .6875rem .875rem;
-    border-bottom: 1px solid var(--border);
+    padding: .625rem .875rem;
+    border-bottom: 1px solid var(--rule);
   }
   .mark {
-    width: 32px; height: 32px; flex: none;
-    border-radius: 9px; background: var(--accent);
+    width: 26px; height: 26px; flex: none;
+    border: 1px solid var(--rule); border-radius: 2px;
+    background: var(--surface);
     display: grid; place-items: center;
   }
-  .mark svg { width: 18px; height: 18px; }
-  .name { font-size: .9375rem; font-weight: 600; letter-spacing: -.01em; line-height: 1.3; }
-  .ver { font-size: .75rem; color: var(--muted); line-height: 1.3; }
-  .close {
-    margin-left: auto; width: 28px; height: 28px; flex: none;
-    border: 0; border-radius: 8px; background: transparent;
-    color: var(--muted); font: inherit; font-size: .875rem; cursor: pointer;
+  .mark svg { width: 14px; height: 14px; display: block; }
+  .mark path { stroke: var(--fg-soft); }
+  .mark .a   { stroke: var(--accent); }
+  .name {
+    font-family: var(--font-display);
+    font-size: .9375rem; font-weight: 400; line-height: 1.25;
   }
-  .close:hover { background: var(--card); color: var(--fg); }
+  .ver {
+    font-family: var(--font-label);
+    font-size: .5625rem; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--fg-soft); line-height: 1.5;
+  }
+  #cur {
+    font-family: var(--font-mono); font-size: .6875rem;
+    letter-spacing: .02em; text-transform: none;
+  }
+  .close {
+    margin-left: auto; width: 24px; height: 24px; flex: none;
+    display: grid; place-items: center;
+    border: 1px solid transparent; border-radius: 2px; background: transparent;
+    color: var(--fg-soft); cursor: pointer;
+    transition: border-color .14s ease, color .14s ease;
+  }
+  .close svg { display: block; }
+  .close:hover { border-color: var(--rule); color: var(--fg); }
+  .close:active { background: var(--raised); }
+  .close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   main {
     flex: 1; min-height: 0;
     padding: .875rem;
-    display: flex; flex-direction: column; justify-content: center; gap: .5rem;
+    display: flex; flex-direction: column; justify-content: center; gap: .625rem;
   }
-  .status { display: flex; align-items: flex-start; gap: .5rem; font-size: .875rem; }
-  .status b { font-weight: 600; }
+  /* The one line of prose in the app that has to carry a verdict — set in the
+     display face, with the version it names in mono. */
+  .status {
+    display: flex; align-items: flex-start; gap: .5rem;
+    font-family: var(--font-display); font-size: 1rem; line-height: 1.35;
+  }
+  .status b {
+    font-family: var(--font-mono); font-weight: 400;
+    font-size: .875em; letter-spacing: .01em;
+  }
+  /* A typesetter's caret, not a spinner: work in progress, no rotation. */
   .spin {
-    width: 14px; height: 14px; flex: none; margin-top: .3rem; display: none;
-    border: 2px solid var(--border); border-top-color: var(--accent);
-    border-radius: 50%; animation: spin .8s linear infinite;
+    width: 2px; height: 15px; flex: none; margin-top: .2rem; display: none;
+    background: var(--accent);
+    animation: caret 1.15s ease-in-out infinite;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .dot { width: 8px; height: 8px; flex: none; margin-top: .45rem; border-radius: 50%; display: none; }
+  @keyframes caret { 0%, 100% { opacity: .22; } 50% { opacity: 1; } }
+  .dot { width: 6px; height: 6px; flex: none; margin-top: .5rem; display: none; }
 
   .bar {
-    display: none; height: 3px; border-radius: 2px;
-    background: var(--border); overflow: hidden;
+    display: none; height: 2px;
+    background: var(--rule); overflow: hidden;
   }
   .bar i {
-    display: block; width: 0; height: 100%; border-radius: 2px;
+    display: block; width: 0; height: 100%;
     background: var(--accent); transition: width .25s ease;
   }
   /* `flex: 0 1 auto` with `min-height: 0` is what keeps a long release note from
@@ -109,22 +137,47 @@
      scroll internally instead of overflowing the panel. */
   .notes {
     display: none; flex: 0 1 auto; min-height: 0;
-    font-size: .75rem; color: var(--muted);
+    padding-left: .625rem; border-left: 2px solid var(--rule);
+    font-size: .75rem; line-height: 1.5; color: var(--fg-soft);
     white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule) transparent;
+  }
+  /* A failure message is machine text; set it as such rather than dressing it
+     up in red. */
+  body.error .notes {
+    border-left-color: var(--warn);
+    font-family: var(--font-mono); font-size: .6875rem;
   }
 
   footer {
     flex: none; display: flex; gap: .5rem; justify-content: flex-end;
-    padding: .6875rem .875rem; border-top: 1px solid var(--border);
+    padding: .625rem .875rem; border-top: 1px solid var(--rule);
   }
   button {
-    font: inherit; font-size: .8125rem; padding: .4375rem .875rem;
-    border-radius: 9px; border: 1px solid var(--border);
-    background: var(--card); color: var(--fg); cursor: pointer;
+    font-family: var(--font-ui); font-size: .8125rem;
+    padding: .4375rem .9375rem;
+    border-radius: 2px; border: 1px solid var(--rule);
+    background: var(--surface); color: var(--fg); cursor: pointer;
+    transition: border-color .14s ease, background-color .14s ease;
   }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button:hover { filter: brightness(1.08); }
+  button:hover { border-color: var(--fg-soft); }
+  button.primary {
+    background: var(--accent); border-color: var(--accent);
+    color: var(--surface);
+  }
+  button.primary:hover { filter: brightness(1.07); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* One orchestrated reveal, head to footer. */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+  header, main, footer { animation: rise .4s cubic-bezier(.2, .7, .3, 1) both; }
+  header { animation-delay: .02s; }
+  main   { animation-delay: .09s; }
+  footer { animation-delay: .15s; }
 
   /* One class on <body> drives the whole panel. */
   body.checking .spin,
@@ -132,7 +185,7 @@
   body.uptodate .dot,
   body.ready .dot { display: block; background: var(--ok); }
   body.available .dot { display: block; background: var(--accent); }
-  body.error .dot { display: block; background: var(--danger); }
+  body.error .dot { display: block; background: var(--warn); }
   body.downloading .bar { display: block; }
   body.available .notes,
   body.downloading .notes,
@@ -145,23 +198,33 @@
   body.error #retry { display: inline-block; }
 
   @media (prefers-reduced-motion: reduce) {
-    .spin { animation: none; }
+    .spin { animation: none; opacity: 1; }
     .bar i { transition: none; }
+    header, main, footer { animation: none; }
+    button, .close { transition: none; }
   }
 </style>
 
 <header data-tauri-drag-region>
   <div class="mark" data-tauri-drag-region aria-hidden="true">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/>
+    <svg viewBox="0 0 20 20" fill="none" stroke-width="1.5" stroke-linecap="square">
+      <path d="M2.5 3.25v13.5"/>
+      <path d="M6 6h11"/>
+      <path d="M6 10h11"/>
+      <path class="a" d="M6 14h6"/>
     </svg>
   </div>
   <div data-tauri-drag-region>
     <div class="name" data-tauri-drag-region>GroupMe</div>
     <div class="ver" data-tauri-drag-region>Version <span id="cur">…</span></div>
   </div>
-  <button class="close" id="close" title="Close" aria-label="Close">✕</button>
+  <button class="close" id="close" title="Close" aria-label="Close">
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"
+         stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+      <line x1="1" y1="1" x2="9" y2="9"/>
+      <line x1="9" y1="1" x2="1" y2="9"/>
+    </svg>
+  </button>
 </header>
 
 <main>

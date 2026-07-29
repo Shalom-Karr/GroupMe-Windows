@@ -29,7 +29,20 @@ fn now_unix() -> i64 {
 }
 
 /// Bump only alongside a matching arm in `migrate`.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
+
+/// v2 adds server read state to `conversations`.
+///
+/// Written as `ALTER TABLE` rather than folded into `SCHEMA_V1` because existing
+/// archives are multiple gigabytes: they must gain the columns in place, not be
+/// rebuilt. `SCHEMA_V1` also declares them, so a fresh database arrives at the
+/// same shape without running this — hence the errors below are ignored
+/// individually, since "duplicate column name" is the expected outcome there.
+const SCHEMA_V2: &[&str] = &[
+    "ALTER TABLE conversations ADD COLUMN unread_count INTEGER",
+    "ALTER TABLE conversations ADD COLUMN last_read_message_id TEXT",
+    "ALTER TABLE conversations ADD COLUMN last_read_at INTEGER",
+];
 
 pub struct Store {
     conn: Connection,
@@ -116,6 +129,15 @@ impl Store {
         if current < 1 {
             tx.execute_batch(SCHEMA_V1)?;
         }
+        if current >= 1 {
+            // Only an existing v1 archive needs these added; a fresh database
+            // already has them from SCHEMA_V1. Each is attempted alone and its
+            // error ignored, so a half-applied migration from an interrupted
+            // run completes instead of failing on the column it already added.
+            for stmt in SCHEMA_V2 {
+                let _ = tx.execute(stmt, []);
+            }
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -156,8 +178,9 @@ impl Store {
                 id, kind, name, description, image_url, creator_user_id,
                 created_at, updated_at, messages_count,
                 last_message_id, last_message_text, last_message_created_at,
-                members_json, raw_json, synced_at
-             ) VALUES (?1,'group',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                members_json, raw_json, synced_at,
+                unread_count, last_read_message_id, last_read_at
+             ) VALUES (?1,'group',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -169,7 +192,14 @@ impl Store {
                 last_message_created_at = excluded.last_message_created_at,
                 members_json = excluded.members_json,
                 raw_json = excluded.raw_json,
-                synced_at = excluded.synced_at",
+                synced_at = excluded.synced_at,
+                -- COALESCE, not a plain overwrite: `GET /v3/groups` omits read
+                -- state on most groups, so a list sync would otherwise erase the
+                -- values a single-group fetch had filled in.
+                unread_count = COALESCE(excluded.unread_count, conversations.unread_count),
+                last_read_message_id =
+                    COALESCE(excluded.last_read_message_id, conversations.last_read_message_id),
+                last_read_at = COALESCE(excluded.last_read_at, conversations.last_read_at)",
             params![
                 g.id,
                 g.name,
@@ -189,6 +219,9 @@ impl Store {
                 serde_json::to_string(&g.members)?,
                 serde_json::to_string(g)?,
                 now,
+                g.unread_count,
+                g.last_read_message_id,
+                g.last_read_at,
             ],
         )?;
 
@@ -209,8 +242,9 @@ impl Store {
             "INSERT INTO conversations (
                 id, kind, name, image_url, created_at, updated_at, messages_count,
                 last_message_id, last_message_text, last_message_created_at,
-                raw_json, synced_at
-             ) VALUES (?1,'dm',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                raw_json, synced_at,
+                unread_count, last_read_message_id, last_read_at
+             ) VALUES (?1,'dm',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 image_url = excluded.image_url,
@@ -220,7 +254,12 @@ impl Store {
                 last_message_text = excluded.last_message_text,
                 last_message_created_at = excluded.last_message_created_at,
                 raw_json = excluded.raw_json,
-                synced_at = excluded.synced_at",
+                synced_at = excluded.synced_at,
+                -- See upsert_group: absent read state must not erase known state.
+                unread_count = COALESCE(excluded.unread_count, conversations.unread_count),
+                last_read_message_id =
+                    COALESCE(excluded.last_read_message_id, conversations.last_read_message_id),
+                last_read_at = COALESCE(excluded.last_read_at, conversations.last_read_at)",
             params![
                 c.other_user.id,
                 c.other_user.name,
@@ -233,6 +272,9 @@ impl Store {
                 c.last_message.as_ref().map(|m| m.created_at),
                 serde_json::to_string(c)?,
                 now,
+                c.unread_count,
+                c.last_read_message_id,
+                c.last_read_at,
             ],
         )?;
         self.upsert_user(
@@ -264,7 +306,8 @@ impl Store {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, name, image_url, updated_at, messages_count,
-                    last_message_text, last_message_created_at
+                    last_message_text, last_message_created_at,
+                    unread_count, last_read_message_id
              FROM conversations
              ORDER BY COALESCE(last_message_created_at, updated_at) DESC",
         )?;
@@ -279,6 +322,8 @@ impl Store {
                 messages_count: r.get(5)?,
                 last_message_text: r.get(6)?,
                 last_message_created_at: r.get(7)?,
+                unread_count: r.get(8)?,
+                last_read_message_id: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -665,7 +710,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     last_message_created_at INTEGER,
     members_json            TEXT,
     raw_json                TEXT,
-    synced_at               INTEGER
+    synced_at               INTEGER,
+    -- Server read state. Nullable on purpose: NULL means GroupMe did not say,
+    -- which is a different claim from "zero unread" and must not be read as
+    -- "already read".
+    unread_count            INTEGER,
+    last_read_message_id    TEXT,
+    last_read_at            INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -1007,6 +1058,121 @@ mod tests {
         s.upsert_user("1", Some("A Renamed"), None).unwrap();
         let urls = s.uncached_avatar_urls(10).unwrap();
         assert!(urls.contains(&"https://i.groupme.com/av.png".to_string()));
+    }
+
+    /// The bug this exists to prevent: a conversation already read on another
+    /// device showing as unread forever, because the archive only knew what this
+    /// window had opened.
+    #[test]
+    fn server_read_state_survives_the_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                name: Some("Example Group".into()),
+                updated_at: 100,
+                unread_count: Some(3),
+                last_read_message_id: Some("170000000000000001".into()),
+                last_read_at: Some(1_785_300_000),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        let c = &s.list_conversations().unwrap()[0];
+        assert_eq!(c.unread_count, Some(3));
+        assert_eq!(
+            c.last_read_message_id.as_deref(),
+            Some("170000000000000001")
+        );
+    }
+
+    /// `GET /v3/groups` omits read state on most groups — 200 of 211 in the
+    /// capture — so a list sync arriving after a single-group fetch must not
+    /// wipe what the detailed fetch established.
+    #[test]
+    fn a_sync_without_read_state_does_not_erase_the_read_state_we_have() {
+        let s = Store::open_in_memory().unwrap();
+        let detailed = Group {
+            id: "10000001".into(),
+            updated_at: 100,
+            unread_count: Some(5),
+            last_read_message_id: Some("170000000000000009".into()),
+            last_read_at: Some(1_785_300_000),
+            ..Default::default()
+        };
+        s.upsert_group(&detailed, 0).unwrap();
+
+        // The same group as the list endpoint returns it: no read state at all.
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 200,
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+
+        let c = &s.list_conversations().unwrap()[0];
+        assert_eq!(
+            c.unread_count,
+            Some(5),
+            "unread_count was erased by a list sync"
+        );
+        assert_eq!(
+            c.last_read_message_id.as_deref(),
+            Some("170000000000000009"),
+            "last_read_message_id was erased by a list sync"
+        );
+        assert_eq!(c.updated_at, 200, "the rest of the row should still update");
+    }
+
+    /// A multi-gigabyte v1 archive has to gain the columns in place rather than
+    /// be rebuilt, so the upgrade path is tested separately from a fresh create.
+    #[test]
+    fn a_v1_archive_upgrades_in_place_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+
+        // Build a v1-shaped archive: original schema, no read-state columns.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT,
+                    description TEXT, image_url TEXT, creator_user_id TEXT,
+                    created_at INTEGER, updated_at INTEGER, messages_count INTEGER,
+                    last_message_id TEXT, last_message_text TEXT,
+                    last_message_created_at INTEGER, members_json TEXT,
+                    raw_json TEXT, synced_at INTEGER
+                 );
+                 INSERT INTO conversations (id, kind, name, updated_at)
+                 VALUES ('10000001','group','Kept',42);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let convos = s.list_conversations().unwrap();
+        assert_eq!(
+            convos.len(),
+            1,
+            "the existing row must survive the migration"
+        );
+        assert_eq!(convos[0].name.as_deref(), Some("Kept"));
+        // Absent, not zero: we have never been told, so the UI must fall back.
+        assert_eq!(convos[0].unread_count, None);
+
+        // Re-opening an already-migrated archive must be a no-op, not an error.
+        drop(s);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(again.list_conversations().unwrap().len(), 1);
     }
 
     #[test]

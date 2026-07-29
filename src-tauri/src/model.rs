@@ -431,6 +431,19 @@ pub struct Group {
     pub members: Vec<Member>,
     #[serde(default)]
     pub messages: Option<GroupPreview>,
+    /// Server-side read state. Without these the client can only guess whether a
+    /// conversation is unread from what *this* window has opened, so anything
+    /// already read on the phone still shows as unread forever.
+    ///
+    /// `Option`, not defaulted to zero: absent and "zero unread" are different
+    /// claims, and treating a missing count as "all read" would silently hide
+    /// genuinely unread conversations.
+    #[serde(default)]
+    pub unread_count: Option<i64>,
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
+    #[serde(default)]
+    pub last_read_at: Option<i64>,
 }
 
 /// The `messages` sub-object on a group carries the last-message preview.
@@ -477,6 +490,14 @@ pub struct Chat {
     pub other_user: OtherUser,
     #[serde(default)]
     pub last_message: Option<Message>,
+    /// See `Group::unread_count` — DMs carry the same read state under the same
+    /// keys, on a different endpoint.
+    #[serde(default)]
+    pub unread_count: Option<i64>,
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
+    #[serde(default)]
+    pub last_read_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -539,6 +560,11 @@ pub struct Conversation {
     pub messages_count: Option<i64>,
     pub last_message_text: Option<String>,
     pub last_message_created_at: Option<i64>,
+    /// Server read state, carried through to the UI so "unread" reflects the
+    /// account rather than this window's history. `None` means GroupMe did not
+    /// tell us, and the client falls back to its local heuristic.
+    pub unread_count: Option<i64>,
+    pub last_read_message_id: Option<String>,
 }
 
 /// GroupMe IDs are decimal strings too large for f64 but comfortably inside
