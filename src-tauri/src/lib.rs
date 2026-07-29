@@ -281,7 +281,18 @@ fn spawn_page_diagnostics(app: tauri::AppHandle) {
         };
         let stage = get("stage");
         let detail = v.get("detail").and_then(|s| s.as_str()).unwrap_or("");
-        // Errors are warnings; the rest is the ordinary lifecycle.
+
+        // Failed images are expected, not a fault: GroupMe's attachment URLs
+        // redirect to expiring signed CDN links, so an avatar that 403s is the
+        // documented behaviour (see docs/groupme-api.md §10) and there is one
+        // per avatar on screen. Warning on each would refill the log with noise
+        // — the same failure mode the levelling above exists to stop.
+        if stage == "resource-error" {
+            log::debug!("page[{stage}] {detail}");
+            return;
+        }
+
+        // Genuine faults are warnings; the rest is the ordinary lifecycle.
         if stage.contains("error") || stage.contains("rejection") {
             log::warn!(
                 "page[{stage}] {} (readyState={}) {detail}",
