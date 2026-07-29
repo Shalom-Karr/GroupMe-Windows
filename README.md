@@ -1,8 +1,20 @@
 # GroupMe for Windows
 
+**[Download](https://github.com/Shalom-Karr/groupme-windows/releases/latest)** ·
+**[groupme-windows on the web](https://shalom-karr.github.io/groupme-windows/)**
+
 A native Windows desktop app built with Tauri 2 and Rust. It wraps `https://web.groupme.com` in a WebView2 window while a background Rust worker archives groups, DMs, messages, and media into a local SQLite database. When the network is unavailable, the window switches to a bundled offline reader backed by that archive.
 
-See [docs/architecture.md](docs/architecture.md) for a full description of how the three parts fit together, and [docs/offline-behaviour.md](docs/offline-behaviour.md) for what works and what doesn't offline.
+Two things make it worth installing:
+
+- **Full-text search over your entire history.** GroupMe has no message search on any platform — its only search box filters the chat list by conversation *name*. This builds an FTS5 index over every message you have ever received.
+- **Read everything offline**, including cached images and avatars.
+
+Offline is **read-only**: you can read your whole history, you cannot send. That is deliberate rather than unfinished — a queue that silently fires messages hours later is a worse product than a disabled composer.
+
+Get the **`-setup.exe`**, not the `.msi` — only the NSIS build auto-updates, and it installs per-user so updates need no admin rights. See [Install the `-setup.exe`, not the `.msi`](#install-the--setupexe-not-the-msi) for why.
+
+See [docs/architecture.md](docs/architecture.md) for how the three parts fit together, [docs/offline-behaviour.md](docs/offline-behaviour.md) for what works offline and what doesn't, and [docs/groupme-api.md](docs/groupme-api.md) for the GroupMe API reference this was built from — written entirely from proxied capture of the real client, and documenting a good deal that GroupMe's own docs omit.
 
 ---
 
