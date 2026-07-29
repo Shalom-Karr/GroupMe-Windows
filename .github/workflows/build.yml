@@ -49,9 +49,18 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+      # Fail on lint groups that indicate a probable bug; let style and
+      # complexity lints report without blocking a release. `-D warnings`
+      # across all of clippy means a suggestion like "&mut [_] instead of
+      # &mut Vec" stops a shipping build, which trains people to bypass the
+      # gate rather than read it.
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: >
+          cargo clippy --all-targets --
+          -D clippy::correctness
+          -D clippy::suspicious
+          -D clippy::perf
 
       # The suite covers the parts that silently corrupt an archive rather than
       # crashing it: ID precision, cursor ordering, upsert idempotency, FTS

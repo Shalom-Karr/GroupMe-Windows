@@ -363,10 +363,7 @@ impl SyncEngine {
             Err(e) => Some(e.to_string()),
         };
         if let Some(e) = failure {
-            log::error!(
-                "creating media directory {}: {e}",
-                self.media_dir.display()
-            );
+            log::error!("creating media directory {}: {e}", self.media_dir.display());
             return 0;
         }
 
@@ -624,7 +621,12 @@ fn hex(bytes: &[u8]) -> String {
 /// response's own content type is the only honest source.
 fn extension_for(content_type: Option<&str>) -> &'static str {
     let raw = content_type.unwrap_or("");
-    let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     match base.as_str() {
         "image/jpeg" | "image/jpg" => ".jpg",
         "image/png" => ".png",
@@ -730,11 +732,7 @@ mod tests {
             .await;
     }
 
-    async fn mount_latest(
-        server: &MockServer,
-        path_pattern: &str,
-        page: Vec<serde_json::Value>,
-    ) {
+    async fn mount_latest(server: &MockServer, path_pattern: &str, page: Vec<serde_json::Value>) {
         Mock::given(method("GET"))
             .and(path_regex(path_pattern))
             .respond_with(group_page(page))
@@ -967,12 +965,7 @@ mod tests {
         )
         .await;
         mount_cursor(&server, G1_MESSAGES, "before_id", "101", vec![]).await;
-        mount_latest(
-            &server,
-            G1_MESSAGES,
-            vec![msg("301", "a"), msg("302", "a")],
-        )
-        .await;
+        mount_latest(&server, G1_MESSAGES, vec![msg("301", "a"), msg("302", "a")]).await;
 
         let store = memory_store();
         let dir = tempfile::tempdir().unwrap();
@@ -1000,10 +993,7 @@ mod tests {
             .sync_conversation("g1", ConversationKind::Group)
             .await
             .unwrap();
-        assert_eq!(
-            state_of(&store, "g1").oldest_id.as_deref(),
-            Some("101")
-        );
+        assert_eq!(state_of(&store, "g1").oldest_id.as_deref(), Some("101"));
     }
 
     #[tokio::test]
@@ -1040,11 +1030,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deleted_at, Some(1784663704));
-        assert_eq!(
-            count_in(&store, "g1"),
-            2,
-            "the tombstone row must survive"
-        );
+        assert_eq!(count_in(&store, "g1"), 2, "the tombstone row must survive");
     }
 
     #[tokio::test]
@@ -1157,9 +1143,10 @@ mod tests {
         .await;
         Mock::given(method("GET"))
             .and(path_regex(G1_MESSAGES))
-            .respond_with(ResponseTemplate::new(401).set_body_json(
-                json!({ "meta": { "code": 401, "errors": ["unauthorized"] } }),
-            ))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({ "meta": { "code": 401, "errors": ["unauthorized"] } })),
+            )
             .mount(&server)
             .await;
 
@@ -1299,11 +1286,17 @@ mod tests {
     #[test]
     fn blob_names_are_stable_and_typed_by_content_type() {
         let url = "https://m.groupme.com/uploads/abc/1792x2400.original.jpeg";
-        assert_eq!(blob_name(url, Some("image/jpeg")), blob_name(url, Some("image/jpeg")));
+        assert_eq!(
+            blob_name(url, Some("image/jpeg")),
+            blob_name(url, Some("image/jpeg"))
+        );
         assert!(blob_name(url, Some("image/jpeg; charset=binary")).ends_with(".jpg"));
         assert!(blob_name(url, None).ends_with(".bin"));
         assert!(blob_name(url, Some("application/octet-stream")).ends_with(".bin"));
-        assert_ne!(blob_name(url, Some("image/jpeg")), blob_name("https://other", Some("image/jpeg")));
+        assert_ne!(
+            blob_name(url, Some("image/jpeg")),
+            blob_name("https://other", Some("image/jpeg"))
+        );
         // 64 hex characters plus the extension.
         assert_eq!(blob_name(url, Some("image/png")).len(), 68);
     }

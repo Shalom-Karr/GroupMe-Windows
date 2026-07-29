@@ -98,7 +98,10 @@ static AUTOSTART: AtomicBool = AtomicBool::new(false);
 /// Called once from `lib.rs` setup(), after the main window exists and the store
 /// has been `manage`d.
 pub fn init(app: &tauri::AppHandle) -> tauri::Result<()> {
-    NOTIFY.store(read_meta(app, META_NOTIFY).map_or(true, |v| v != "0"), Ordering::Relaxed);
+    NOTIFY.store(
+        read_meta(app, META_NOTIFY).map_or(true, |v| v != "0"),
+        Ordering::Relaxed,
+    );
     let account = read_meta(app, META_ACCOUNT_NAME);
     build_tray(app, account)?;
     hook_close_to_tray(app);
@@ -205,7 +208,9 @@ pub fn show_app_menu_inner(app: &tauri::AppHandle) {
     // runs a blocking modal message loop that still pumps main-thread tasks, so a
     // sync tick landing mid-menu would re-enter set_unread and self-deadlock on
     // this same mutex.
-    let menu = HANDLES.get().and_then(|l| l.lock().ok().map(|h| h.menu.clone()));
+    let menu = HANDLES
+        .get()
+        .and_then(|l| l.lock().ok().map(|h| h.menu.clone()));
     if let Some(menu) = menu {
         let _ = window.popup_menu(&menu);
     }
@@ -224,8 +229,13 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
         None::<&str>,
     )?;
     let show_i = MenuItem::with_id(app, "show", "Show GroupMe", true, None::<&str>)?;
-    let updates_i =
-        MenuItem::with_id(app, "check_updates", "Check for updates…", true, None::<&str>)?;
+    let updates_i = MenuItem::with_id(
+        app,
+        "check_updates",
+        "Check for updates…",
+        true,
+        None::<&str>,
+    )?;
     let notify_i = CheckMenuItem::with_id(
         app,
         "notify_toggle",
@@ -380,7 +390,10 @@ fn toggle_autostart(app: &tauri::AppHandle) {
         let h = lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = h.autostart.set_checked(desired);
     }
-    if let Err(e) = app.emit(EVENT_TOGGLE_AUTOSTART, serde_json::json!({ "enabled": desired })) {
+    if let Err(e) = app.emit(
+        EVENT_TOGGLE_AUTOSTART,
+        serde_json::json!({ "enabled": desired }),
+    ) {
         log::warn!("tray: could not emit {EVENT_TOGGLE_AUTOSTART}: {e}");
     }
 }
@@ -647,7 +660,7 @@ fn make_badged_icon(base: &Image, label: &str) -> Option<Image<'static>> {
 
 /// Is cell `(col, row)` of the rendered `label` inked?
 fn text_cell_on(label: &str, col: i32, row: i32) -> bool {
-    if row < 0 || row >= GLYPH_H || col < 0 {
+    if !(0..GLYPH_H).contains(&row) || col < 0 {
         return false;
     }
     let index = col / (GLYPH_W + 1);
@@ -708,8 +721,14 @@ mod tests {
 
     #[test]
     fn tooltip_says_when_we_are_not_reading_live() {
-        assert_eq!(tooltip_for(0, "offline"), "GroupMe — offline, reading archive");
-        assert_eq!(tooltip_for(3, "offline"), "GroupMe — 3 unread — offline, reading archive");
+        assert_eq!(
+            tooltip_for(0, "offline"),
+            "GroupMe — offline, reading archive"
+        );
+        assert_eq!(
+            tooltip_for(3, "offline"),
+            "GroupMe — 3 unread — offline, reading archive"
+        );
         assert_eq!(tooltip_for(0, "degraded"), "GroupMe — unstable connection");
         // An unrecognised state must not silently claim we are online.
         assert_eq!(tooltip_for(0, ""), "GroupMe");
@@ -717,7 +736,10 @@ mod tests {
 
     #[test]
     fn status_line_pairs_the_account_with_connectivity() {
-        assert_eq!(status_label(Some("Example Sender"), "online"), "Example Sender — Online");
+        assert_eq!(
+            status_label(Some("Example Sender"), "online"),
+            "Example Sender — Online"
+        );
         assert_eq!(
             status_label(Some("Example Sender"), "offline"),
             "Example Sender — Offline — reading archive"
@@ -740,7 +762,9 @@ mod tests {
     #[test]
     fn every_badge_label_is_actually_renderable() {
         for n in [0usize, 1, 5, 9, 10, 250] {
-            let Some(label) = badge_label(n) else { continue };
+            let Some(label) = badge_label(n) else {
+                continue;
+            };
             for c in label.chars() {
                 assert!(glyph(c).is_some(), "no glyph for {c:?} in badge {label:?}");
             }
@@ -773,11 +797,19 @@ mod tests {
 
         let long = "a".repeat(500);
         let out = notification_body(&long);
-        assert_eq!(out.chars().count(), MAX_BODY_CHARS + 1, "kept 120 chars plus the ellipsis");
+        assert_eq!(
+            out.chars().count(),
+            MAX_BODY_CHARS + 1,
+            "kept 120 chars plus the ellipsis"
+        );
         assert!(out.ends_with('…'));
 
         let exact = "b".repeat(MAX_BODY_CHARS);
-        assert_eq!(notification_body(&exact), exact, "no ellipsis at the boundary");
+        assert_eq!(
+            notification_body(&exact),
+            exact,
+            "no ellipsis at the boundary"
+        );
     }
 
     #[test]
@@ -808,7 +840,10 @@ mod tests {
 
     #[test]
     fn notification_title_identifies_sender_and_conversation() {
-        assert_eq!(notification_title("Ada", "Study Group"), "Ada — Study Group");
+        assert_eq!(
+            notification_title("Ada", "Study Group"),
+            "Ada — Study Group"
+        );
         // A DM: the conversation is the sender.
         assert_eq!(notification_title("Ada", "Ada"), "Ada");
         assert_eq!(notification_title("Ada", ""), "Ada");

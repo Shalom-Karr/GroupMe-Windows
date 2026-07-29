@@ -48,18 +48,13 @@ pub fn fingerprint(token: &str) -> String {
 /// Real tokens are ~40 chars of [A-Za-z0-9]. Accept 20..=128 alphanumeric.
 pub fn looks_like_token(candidate: &str) -> bool {
     let len = candidate.len();
-    len >= 20
-        && len <= 128
-        && candidate.bytes().all(|b| b.is_ascii_alphanumeric())
+    (20..=128).contains(&len) && candidate.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// Redacts a token for logging: first 4 chars + ellipsis. NEVER log a whole token.
 pub fn redact(token: &str) -> String {
     // char_indices gives byte offsets; .nth(4) is the start of the 5th char.
-    let end = token
-        .char_indices()
-        .nth(4)
-        .map_or(token.len(), |(i, _)| i);
+    let end = token.char_indices().nth(4).map_or(token.len(), |(i, _)| i);
     format!("{}...", &token[..end])
 }
 
@@ -213,7 +208,10 @@ mod tests {
     fn redact_never_contains_full_token() {
         let token = "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ56";
         let r = redact(token);
-        assert!(!r.contains(token), "redacted form must not contain the full token");
+        assert!(
+            !r.contains(token),
+            "redacted form must not contain the full token"
+        );
     }
 
     #[test]
@@ -239,10 +237,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn keyring_roundtrip() {
-        let store = TokenStore::with_account(
-            "dev.shalomkarr.groupme.test",
-            "test-roundtrip-token",
-        );
+        let store = TokenStore::with_account("dev.shalomkarr.groupme.test", "test-roundtrip-token");
 
         // Start with a clean slate in case a previous run left debris.
         let _ = store.delete();
@@ -268,10 +263,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn save_rejects_malformed_token() {
-        let store = TokenStore::with_account(
-            "dev.shalomkarr.groupme.test",
-            "test-malformed-token",
-        );
+        let store = TokenStore::with_account("dev.shalomkarr.groupme.test", "test-malformed-token");
         // Short / non-alphanumeric — must be rejected before touching keyring.
         assert!(matches!(store.save("bad!"), Err(TokenError::Malformed)));
     }

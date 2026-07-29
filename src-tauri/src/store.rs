@@ -19,9 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::model::{
-    id_sort_key, Chat, Conversation, ConversationKind, Group, Message,
-};
+use crate::model::{id_sort_key, Chat, Conversation, ConversationKind, Group, Message};
 
 /// Bump only alongside a matching arm in `migrate`.
 pub const SCHEMA_VERSION: i32 = 1;
@@ -72,10 +70,10 @@ impl Store {
     }
 
     fn migrate(&mut self) -> Result<()> {
-        let current: i32 =
-            self.conn
-                .query_row("PRAGMA user_version", [], |r| r.get(0))
-                .unwrap_or(0);
+        let current: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
 
         if current >= SCHEMA_VERSION {
             return Ok(());
@@ -91,7 +89,9 @@ impl Store {
     }
 
     pub fn schema_version(&self) -> Result<i32> {
-        Ok(self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
     // ---------------------------------------------------------------- meta
@@ -252,11 +252,9 @@ impl Store {
     }
 
     pub fn conversation_count(&self) -> Result<usize> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM conversations",
-            [],
-            |r| r.get(0),
-        )?)
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?)
     }
 
     // ------------------------------------------------------------ messages
@@ -299,8 +297,7 @@ impl Store {
                  VALUES (?1, ?2, ?3,
                      (SELECT COUNT(*) FROM media_cache WHERE url = ?3))",
             )?;
-            let mut clear_att =
-                tx.prepare("DELETE FROM attachments WHERE message_id = ?1")?;
+            let mut clear_att = tx.prepare("DELETE FROM attachments WHERE message_id = ?1")?;
             // Prepare once rather than recompiling on every message.
             let mut user_stmt = tx.prepare(
                 "INSERT INTO users (id, name, avatar_url) VALUES (?1,?2,?3)
@@ -339,11 +336,7 @@ impl Store {
                 if changed > 0 {
                     clear_att.execute(params![m.id])?;
                     for a in &m.attachments {
-                        att_stmt.execute(params![
-                            m.id,
-                            a.kind(),
-                            a.media_url(),
-                        ])?;
+                        att_stmt.execute(params![m.id, a.kind(), a.media_url(),])?;
                     }
                 }
 
@@ -783,11 +776,8 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         // Deliberately mixed digit lengths: lexicographic sort would put "99"
         // above "100", integer sort must not.
-        s.insert_messages(
-            "g1",
-            &[msg("99", "older", 1), msg("100", "newer", 2)],
-        )
-        .unwrap();
+        s.insert_messages("g1", &[msg("99", "older", 1), msg("100", "newer", 2)])
+            .unwrap();
         let page = s.messages_page("g1", 10, None).unwrap();
         assert_eq!(page[0].id, "100", "newest must sort first");
         assert_eq!(page[1].id, "99");
@@ -931,7 +921,9 @@ mod tests {
         .unwrap();
         assert!(s.uncached_media_urls(10).unwrap().is_empty());
         assert_eq!(
-            s.get_media("https://i.groupme.com/a.png").unwrap().as_deref(),
+            s.get_media("https://i.groupme.com/a.png")
+                .unwrap()
+                .as_deref(),
             Some("blobs/a.png")
         );
     }

@@ -99,18 +99,15 @@ pub fn run() {
 
             // Built here rather than declared in tauri.conf.json because an
             // initialization script can only be attached at window-build time.
-            let window = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::App(ROUTER_PAGE.into()),
-            )
-            .title("GroupMe")
-            .inner_size(1200.0, 820.0)
-            .min_inner_size(800.0, 600.0)
-            .resizable(true)
-            .center()
-            .initialization_script(INJECT_JS)
-            .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App(ROUTER_PAGE.into()))
+                    .title("GroupMe")
+                    .inner_size(1200.0, 820.0)
+                    .min_inner_size(800.0, 600.0)
+                    .resizable(true)
+                    .center()
+                    .initialization_script(INJECT_JS)
+                    .build()?;
 
             tray::init(app.handle())?;
             updater::spawn_periodic_check(app.handle().clone());
@@ -152,11 +149,7 @@ pub fn run() {
 /// The token arrives over the event channel rather than `invoke` because the
 /// remote GroupMe origin is granted only `core:event:*` — it is third-party
 /// code we do not control, so it gets no command access at all.
-fn spawn_token_listener(
-    app: tauri::AppHandle,
-    store: SharedStore,
-    media_dir: std::path::PathBuf,
-) {
+fn spawn_token_listener(app: tauri::AppHandle, store: SharedStore, media_dir: std::path::PathBuf) {
     let handle = app.clone();
     app.listen("groupme://token", move |event| {
         let Some(token) = parse_token_payload(event.payload()) else {
@@ -200,7 +193,12 @@ async fn adopt_token(
     //
     // So the token is treated as an unverified claim until `/users/me` says
     // otherwise. Persistence happens in `start_sync`, after verification.
-    publish_token(app.clone(), store.clone(), media_dir.to_path_buf(), token.to_string());
+    publish_token(
+        app.clone(),
+        store.clone(),
+        media_dir.to_path_buf(),
+        token.to_string(),
+    );
     Ok(())
 }
 
@@ -550,7 +548,10 @@ mod tests {
     #[test]
     fn offline_url_is_local_and_never_remote() {
         let u = offline_url();
-        assert!(!u.as_str().starts_with("https://"), "offline page must be local");
+        assert!(
+            !u.as_str().starts_with("https://"),
+            "offline page must be local"
+        );
         assert!(u.as_str().contains(OFFLINE_PAGE));
     }
 }

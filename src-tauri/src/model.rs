@@ -224,7 +224,12 @@ impl SystemEvent {
     /// Normalizes the number-or-string ID inconsistency described above.
     pub fn subject_user_id(&self) -> Option<String> {
         for key in ["removed_user", "user", "added_user"] {
-            if let Some(v) = self.data.get(key).and_then(|u| u.get("id")).and_then(json_id) {
+            if let Some(v) = self
+                .data
+                .get(key)
+                .and_then(|u| u.get("id"))
+                .and_then(json_id)
+            {
                 return Some(v);
             }
         }
@@ -363,9 +368,9 @@ impl Attachment {
     /// for offline viewing.
     pub fn media_url(&self) -> Option<&str> {
         match self {
-            Attachment::Image { url, source_url, .. } => {
-                url.as_deref().or(source_url.as_deref())
-            }
+            Attachment::Image {
+                url, source_url, ..
+            } => url.as_deref().or(source_url.as_deref()),
             Attachment::Video { preview_url, url } => preview_url.as_deref().or(url.as_deref()),
             _ => None,
         }
@@ -633,7 +638,10 @@ mod tests {
             }]}"#,
         )
         .unwrap();
-        assert_eq!(m.attachments[0].blur_hash(), Some("]47^xx~D4URPjF?a9Z01b]?I"));
+        assert_eq!(
+            m.attachments[0].blur_hash(),
+            Some("]47^xx~D4URPjF?a9Z01b]?I")
+        );
         assert!(m.attachments[0].media_url().unwrap().ends_with(".png"));
     }
 
@@ -737,7 +745,10 @@ mod tests {
                 "message":{"text":"corrected body","attachments":[]}}}"#,
         )
         .unwrap();
-        assert_eq!(ev.target_message_id().as_deref(), Some("170000000000000004"));
+        assert_eq!(
+            ev.target_message_id().as_deref(),
+            Some("170000000000000004")
+        );
         assert_eq!(ev.updated_text(), Some("corrected body"));
     }
 
@@ -749,7 +760,10 @@ mod tests {
                 "deletion_actor":"sender"}}"#,
         )
         .unwrap();
-        assert_eq!(ev.target_message_id().as_deref(), Some("170000000000000005"));
+        assert_eq!(
+            ev.target_message_id().as_deref(),
+            Some("170000000000000005")
+        );
         assert_eq!(ev.deleted_at(), Some(1784663704));
     }
 
@@ -1003,7 +1017,10 @@ mod tests {
         let reloaded: Message = serde_json::from_str(&stored).unwrap();
         match &reloaded.attachments[0] {
             Attachment::Other(v) => {
-                assert_eq!(v.get("part_id").and_then(|x| x.as_str()), Some("y18WnBkDWUq8B7cPFFsDk"));
+                assert_eq!(
+                    v.get("part_id").and_then(|x| x.as_str()),
+                    Some("y18WnBkDWUq8B7cPFFsDk")
+                );
                 assert_eq!(
                     v.pointer("/citations/0/url").and_then(|x| x.as_str()),
                     Some("https://example.com/")
@@ -1022,14 +1039,19 @@ mod tests {
             source_url: None,
             blur_hash: Some("]47^xx~D4URPjF".into()),
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("image"));
-        assert_eq!(v.get("blur_hash").and_then(|t| t.as_str()), Some("]47^xx~D4URPjF"));
+        assert_eq!(
+            v.get("blur_hash").and_then(|t| t.as_str()),
+            Some("]47^xx~D4URPjF")
+        );
     }
 
     #[test]
     fn attachment_that_is_not_an_object_degrades_instead_of_failing() {
-        let m: Message = serde_json::from_str(r#"{"id":"1","attachments":["nonsense",7]}"#).unwrap();
+        let m: Message =
+            serde_json::from_str(r#"{"id":"1","attachments":["nonsense",7]}"#).unwrap();
         assert_eq!(m.attachments.len(), 2);
         assert_eq!(m.attachments[0].kind(), "other");
     }
@@ -1049,8 +1071,10 @@ mod tests {
         assert!(m.group_id.is_none());
 
         // And it must survive the archive's parse -> serialize -> reload cycle.
-        let reloaded: Message =
-            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert_eq!(reloaded.conversation_id.as_deref(), Some("20000001+20000002"));
+        let reloaded: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.conversation_id.as_deref(),
+            Some("20000001+20000002")
+        );
     }
 }

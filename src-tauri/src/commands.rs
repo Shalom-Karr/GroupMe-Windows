@@ -196,8 +196,8 @@ mod tests {
         // Assembled at runtime so the literals never appear in the file being
         // scanned — otherwise this list is its own counterexample.
         let verbs = [
-            "send_", "post_", "delete_", "edit_", "update_", "create_",
-            "react", "like_", "unlike_", "remove_", "pin_", "unpin_",
+            "send_", "post_", "delete_", "edit_", "update_", "create_", "react", "like_",
+            "unlike_", "remove_", "pin_", "unpin_",
         ];
         for verb in verbs {
             let needle = format!("fn {verb}");
@@ -245,7 +245,11 @@ mod tests {
     fn a_real_id_survives_the_cursor_round_trip_that_a_double_would_corrupt() {
         let raw = "170000000000000007";
         let exact = id_sort_key(raw);
-        assert_eq!(exact.to_string(), raw, "the string cursor must parse exactly");
+        assert_eq!(
+            exact.to_string(),
+            raw,
+            "the string cursor must parse exactly"
+        );
         // What `Number(message.id)` handed us instead: past 2^53 a double's ulp
         // is 32, so the boundary message is either repeated or silently skipped.
         assert_ne!(exact, raw.parse::<f64>().unwrap() as i64);
@@ -261,7 +265,11 @@ mod tests {
     fn search_survives_quote_characters_in_user_input() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_group(
-            &Group { id: "g1".into(), name: Some("Example".into()), ..Default::default() },
+            &Group {
+                id: "g1".into(),
+                name: Some("Example".into()),
+                ..Default::default()
+            },
             0,
         )
         .unwrap();
@@ -269,7 +277,10 @@ mod tests {
         // A bare quote is an FTS5 syntax error; the command quotes and strips.
         let raw = "say \"hello\"";
         let phrase = format!("\"{}\"", raw.replace('"', ""));
-        assert!(s.search(&phrase, 10).is_ok(), "unbalanced quotes must not error");
+        assert!(
+            s.search(&phrase, 10).is_ok(),
+            "unbalanced quotes must not error"
+        );
     }
 
     #[tokio::test]

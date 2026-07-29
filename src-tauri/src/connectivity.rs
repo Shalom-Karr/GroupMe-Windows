@@ -79,7 +79,10 @@ impl HttpProbe {
             // Only fails when no TLS backend is available — unrecoverable at
             // init time, so a panic here is appropriate.
             .expect("reqwest client construction failed (no TLS backend)");
-        Self { client, url: url.into() }
+        Self {
+            client,
+            url: url.into(),
+        }
     }
 }
 
@@ -291,9 +294,7 @@ mod tests {
     impl FakeProbe {
         /// Returns `(probe, shared_call_counter)`.
         /// Results beyond the script return `true` (optimistic default).
-        fn with_script(
-            results: impl IntoIterator<Item = bool>,
-        ) -> (Self, Arc<AtomicUsize>) {
+        fn with_script(results: impl IntoIterator<Item = bool>) -> (Self, Arc<AtomicUsize>) {
             let count = Arc::new(AtomicUsize::new(0));
             let probe = Self {
                 results: Mutex::new(results.into_iter().collect()),

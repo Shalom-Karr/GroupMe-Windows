@@ -67,9 +67,7 @@ impl GroupMeClient {
         token: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Result<Self, ApiError> {
-        let client = Client::builder()
-            .user_agent("GroupMeDesktop/0.1")
-            .build()?;
+        let client = Client::builder().user_agent("GroupMeDesktop/0.1").build()?;
         Ok(Self {
             client,
             token: token.into(),
@@ -111,10 +109,15 @@ impl GroupMeClient {
                 s if s == StatusCode::TOO_MANY_REQUESTS || s.is_server_error() => {
                     if attempt >= MAX_RETRIES {
                         return if s == StatusCode::TOO_MANY_REQUESTS {
-                            Err(ApiError::RateLimited { attempts: attempt + 1 })
+                            Err(ApiError::RateLimited {
+                                attempts: attempt + 1,
+                            })
                         } else {
                             let body = resp.text().await.unwrap_or_default();
-                            Err(ApiError::Status { status: s.as_u16(), body })
+                            Err(ApiError::Status {
+                                status: s.as_u16(),
+                                body,
+                            })
                         };
                     }
                     let delay_ms = self.base_delay_ms * (1u64 << attempt);
@@ -125,7 +128,10 @@ impl GroupMeClient {
                 }
                 s if !s.is_success() => {
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(ApiError::Status { status: s.as_u16(), body });
+                    return Err(ApiError::Status {
+                        status: s.as_u16(),
+                        body,
+                    });
                 }
                 _ => return Ok(resp),
             }
@@ -192,7 +198,9 @@ impl GroupMeClient {
     ) -> Result<Vec<Message>, ApiError> {
         let url = self.api_url(&format!("/groups/{group_id}/messages"));
         let resp = self
-            .send_with_retry(|| apply_cursor(self.authed_get(&url).query(&[("limit", "100")]), cursor))
+            .send_with_retry(|| {
+                apply_cursor(self.authed_get(&url).query(&[("limit", "100")]), cursor)
+            })
             .await?;
         let page: GroupMessagesPage = decode_envelope(resp).await?;
         let mut msgs = page.messages;
@@ -290,7 +298,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/users/me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {"id": "123", "name": "Test User"}
             })))
@@ -317,7 +325,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/groups"))
             .and(query_param("page", "1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": full
             })))
@@ -327,7 +335,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/groups"))
             .and(query_param("page", "2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": partial
             })))
@@ -348,7 +356,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/groups/42/messages"))
             .and(query_param("limit", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {"count": 1, "messages": [{"id": "1", "created_at": 1000}]}
             })))
@@ -368,7 +376,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/groups/42/messages"))
             .and(query_param("before_id", "999"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {"count": 1, "messages": [{"id": "998", "created_at": 900}]}
             })))
@@ -392,7 +400,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/groups/42/messages"))
             .and(query_param("since_id", "50"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {
                     "count": 3,
@@ -432,7 +440,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/groups/1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {"count": 0, "messages": []}
             })))
@@ -451,7 +459,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/groups/1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": null
             })))
@@ -493,7 +501,7 @@ mod tests {
         // Register success mock first so it has lower LIFO priority.
         Mock::given(method("GET"))
             .and(path("/users/me"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {"id": "1"}
             })))
@@ -537,7 +545,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/groups/1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {
                     "count": 1,
@@ -573,7 +581,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/direct_messages"))
             .and(query_param("other_user_id", "99"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "meta": {"code": 200},
                 "response": {
                     "count": 2,
