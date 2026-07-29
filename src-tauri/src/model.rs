@@ -135,13 +135,20 @@ impl Message {
         self.updated_at.is_some()
     }
 
-    /// Total distinct reactors. `favorited_by` is the flattened union of
-    /// `reactions[].user_ids`, so prefer it and fall back to summing.
+    /// Number of distinct people who reacted.
+    ///
+    /// `favorited_by` is NOT a set — a live `like.create` frame was observed
+    /// carrying `["130331046", "130331046"]`, the same account twice, so its
+    /// length over-counts. Both sources are deduplicated before counting.
     pub fn reaction_count(&self) -> usize {
-        if !self.favorited_by.is_empty() {
-            return self.favorited_by.len();
-        }
-        self.reactions.iter().map(|r| r.user_ids.len()).sum()
+        let mut seen: std::collections::HashSet<&str> =
+            self.favorited_by.iter().map(String::as_str).collect();
+        seen.extend(
+            self.reactions
+                .iter()
+                .flat_map(|r| r.user_ids.iter().map(String::as_str)),
+        );
+        seen.len()
     }
 }
 
@@ -667,6 +674,31 @@ mod tests {
         .unwrap();
         assert_eq!(m.reactions[0].display_char(), None);
         assert_eq!(m.reaction_count(), 3);
+    }
+
+    #[test]
+    fn duplicate_ids_in_favorited_by_are_not_double_counted() {
+        // Observed verbatim on a live `like.create` websocket frame: one
+        // reactor listed twice. Counting the raw length reported two people.
+        let m: Message = serde_json::from_str(
+            r#"{"id":"1","favorited_by":["20000001","20000001"],
+                "reactions":[{"type":"emoji","pack_id":"18","pack_index":"23",
+                              "user_ids":["20000001"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.reaction_count(), 1, "one person reacted, not two");
+    }
+
+    #[test]
+    fn reaction_count_unions_both_sources() {
+        // A reactor present only in reactions[] still counts.
+        let m: Message = serde_json::from_str(
+            r#"{"id":"1","favorited_by":["20000001"],
+                "reactions":[{"type":"unicode","code":"ð",
+                              "user_ids":["20000001","20000002"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.reaction_count(), 2);
     }
 
     #[test]
