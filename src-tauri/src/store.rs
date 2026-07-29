@@ -1096,7 +1096,8 @@ mod tests {
         // deletion still shows the message as live; that must not win.
         let mut s = Store::open_in_memory().unwrap();
         let original = msg("170000000000000005", "since deleted", 1);
-        s.insert_messages("g1", &[original.clone()]).unwrap();
+        s.insert_messages("g1", std::slice::from_ref(&original))
+            .unwrap();
 
         let ev: crate::model::SystemEvent = serde_json::from_str(
             r#"{"type":"message.deleted","data":{

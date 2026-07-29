@@ -37,7 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `@stable`. A floating toolchain silently changes the lint
+      # set between runs, so a tree that is clean locally fails CI on lints the
+      # local clippy does not yet know about — which is exactly what happened.
+      # Bump this deliberately.
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
 
@@ -79,7 +83,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `@stable`. A floating toolchain silently changes the lint
+      # set between runs, so a tree that is clean locally fails CI on lints the
+      # local clippy does not yet know about — which is exactly what happened.
+      # Bump this deliberately.
+      - uses: dtolnay/rust-toolchain@1.97.0
 
       - uses: swatinem/rust-cache@v2
         with:

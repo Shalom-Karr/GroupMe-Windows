@@ -260,7 +260,7 @@ fn apply_cursor(req: reqwest::RequestBuilder, cursor: &Cursor) -> reqwest::Reque
     }
 }
 
-fn sort_ascending(msgs: &mut Vec<Message>) {
+fn sort_ascending(msgs: &mut [Message]) {
     msgs.sort_by_key(|m| model::id_sort_key(&m.id));
 }
 

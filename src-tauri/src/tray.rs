@@ -699,8 +699,9 @@ fn blend(dst: &mut image::Rgba<u8>, src: [u8; 4], cov: f32) {
     if a <= 0.0 {
         return;
     }
-    for i in 0..3 {
-        dst.0[i] = (src[i] as f32 * a + dst.0[i] as f32 * (1.0 - a))
+    // Colour channels only; alpha is composited separately below.
+    for (channel, &s) in dst.0.iter_mut().zip(src.iter()).take(3) {
+        *channel = (s as f32 * a + *channel as f32 * (1.0 - a))
             .round()
             .clamp(0.0, 255.0) as u8;
     }
