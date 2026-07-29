@@ -1,0 +1,24 @@
+# Build output
+src-tauri/target/
+node_modules/
+dist/
+
+# Tauri generates these from tauri.conf.json + capabilities
+src-tauri/gen/schemas/
+
+# Captured traffic contains a LIVE access token, session cookies, and the full
+# plaintext of every message fetched while recording. Never commit it.
+tools/capture-out/
+tools/.chrome-profile/
+
+# Local archive database
+*.db
+*.db-wal
+*.db-shm
+
+.env
+.env.*
+
+# Python bytecode
+tools/__pycache__/
+*.pyc

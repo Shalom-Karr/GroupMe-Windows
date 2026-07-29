@@ -1,0 +1,82 @@
+[package]
+name = "groupme-desktop"
+version = "0.1.0"
+description = "GroupMe for Windows — native desktop shell (Tauri 2) with a local SQLite archive for offline reading"
+authors = ["Shalom Karr"]
+# AGPL-3.0-only WITH the Commons Clause condition. Commons Clause has no SPDX
+# identifier, so the file is authoritative and `license` is deliberately unset —
+# a bare "AGPL-3.0-only" here would misstate the terms as permitting commercial
+# use. See LICENSE: non-commercial only without a separate paid licence.
+license-file = "../LICENSE"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "groupme_desktop_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "groupme-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` registers the `asset:` URI scheme. Without it `convertFileSrc`
+# resolves to a handler that was never installed, so every cached avatar and
+# image silently fails to load and the offline reader shows placeholders for
+# media it already has on disk.
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+
+# Tray icon compositing: the unread badge is drawn over the base icon at
+# runtime rather than shipping a second icon file per state.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Archive storage. `bundled` compiles SQLite from source, which both removes the
+# system-sqlite dependency on end-user machines and turns on FTS5 — the archive
+# is only worth having if it is searchable.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "gzip",
+  "stream",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Access token lives in Windows Credential Manager, never in the SQLite file or
+# a plaintext config. The DB holds only a fingerprint so we can tell whether the
+# archive belongs to the account currently signed in.
+keyring = { version = "3", features = ["windows-native"] }
+sha2 = "0.10"
+
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+tauri-plugin-log = "2"
+
+[dev-dependencies]
+# Every API-client test runs against a local mock rather than api.groupme.com,
+# so the suite is offline, deterministic, and safe to run without an account.
+wiremock = "0.6"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "test-util"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+# opt-level 3, not "s". Size optimisation costs 10-25% on the hot paths here —
+# serde_json over every message, SHA-256 per cached blob, FTS5 tokenisation —
+# to save a few hundred KB of installer, which nobody notices.
+opt-level = 3
+strip = true

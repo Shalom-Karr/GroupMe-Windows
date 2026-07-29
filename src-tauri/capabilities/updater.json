@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater-dialog",
+  "description": "The frameless update dialog. Deliberately does NOT grant updater:default — the Rust side calls app.updater_builder() directly (which bypasses the ACL) and the dialog never touches the plugin from JS, so granting it would let this page invoke plugin:updater|download_and_install itself, which is exactly the decision this module exists to keep in Rust. core:default already covers core:event:*.",
+  "windows": ["updater"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide"
+  ]
+}

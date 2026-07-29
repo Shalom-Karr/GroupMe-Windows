@@ -1,0 +1,136 @@
+name: Build
+
+# Fires when the compiled app actually changes. Documentation and tooling edits
+# do not produce a different binary, so they do not burn a Windows runner or cut
+# a release nobody needs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/src/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/build.rs"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/capabilities/**"
+      - "src-tauri/frontend/**"
+      - "src-tauri/icons/**"
+      - "package.json"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The suite covers the parts that silently corrupt an archive rather than
+      # crashing it: ID precision, cursor ordering, upsert idempotency, FTS
+      # staleness after an edit, and the read-only guarantee on the offline
+      # surface. A green build here is the gate on shipping an installer.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+  release:
+    name: Release
+    # Never ship an installer built from code that failed its tests.
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Tauri CLI
+        run: npm ci
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          "value=$v" >> $env:GITHUB_OUTPUT
+          "Building version $v"
+
+      - name: Build installers and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts and generates latest.json, which the
+          # app fetches from the release. Without these the build still
+          # succeeds but ships an unsigned bundle that installed copies will
+          # refuse — so a missing secret breaks updates silently, not loudly.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: GroupMe for Windows v__VERSION__
+          releaseBody: |
+            Native Windows build of GroupMe with a local offline archive.
+
+            **Download:** the `.msi` for a standard install, or the
+            `-setup.exe` (NSIS) if you prefer that installer.
+
+            Requires the WebView2 runtime, which is preinstalled on Windows 11
+            and installed automatically by the bundled bootstrapper otherwise.
+
+            Read offline; sending requires a connection.
+
+            Non-commercial use only — commercial use needs a separate licence.
+            See LICENSE.
+          releaseDraft: false
+          prerelease: false
+          # Both bundles: MSI for policy-managed / silent deployment, NSIS for
+          # ordinary users. Building only one always turns out to be the wrong one.
+          args: --bundles msi,nsis
+
+      - name: Summarise artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/target/release/bundle"
+          if (Test-Path $dir) {
+            Get-ChildItem $dir -Recurse -Include *.msi, *.exe |
+              ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          } else {
+            "no bundle directory produced"
+          }

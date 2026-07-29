@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-groupme",
+  "description": "Capabilities granted to web.groupme.com itself. Scoped as tightly as the token-capture script allows: event emit/listen plus the two ingest commands. GroupMe's own page is third-party code we do not control, so it gets no filesystem, shell, or window access, and no archive read commands.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://web.groupme.com/*"]
+  },
+  "permissions": [
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

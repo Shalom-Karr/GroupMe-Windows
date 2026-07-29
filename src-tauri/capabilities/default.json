@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Local surfaces: the splash router and the offline reader. These are our own bundled pages, so they get the archive read commands.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "opener:default",
+    "notification:default"
+  ]
+}
