@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "status-window",
+  "description": "The sync-status panel opened from the tray menu. Frameless, so it needs start-dragging. It hides (not closes) on dismiss so it needs allow-hide. It invokes archive_stats and listens for archive://synced — both covered by core:default, which includes core:event:*. No updater, no filesystem, no network access granted.",
+  "windows": ["status"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide"
+  ]
+}

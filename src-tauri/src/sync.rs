@@ -8,9 +8,27 @@
 //!    walking back through 2019 would hand them an archive that is complete at
 //!    the wrong end.
 //! 2. **Backfill** — older than `sync_state.oldest_id`, via `Cursor::Before`,
-//!    capped at `backfill_pages_per_cycle` pages so one 30,000-message group
-//!    cannot starve every other conversation. The cap costs nothing but wall
-//!    clock: the walk resumes from the persisted cursor on the next cycle.
+//!    capped at a page budget so one 142,000-message group cannot starve every
+//!    other conversation. The cap costs nothing but wall clock: the walk resumes
+//!    from the persisted cursor on the next cycle.
+//!
+//! The same ordering is applied a level up, across conversations. A cycle that
+//! finished each conversation before starting the next would leave the hundredth
+//! chat empty until the ninety-ninth had spent its entire backfill budget, so
+//! **every conversation nobody has tailed yet gets its newest page before any
+//! conversation walks backwards**. A cold archive is therefore useful in
+//! seconds rather than tens of minutes, and a group joined later jumps the
+//! queue for the same reason.
+//!
+//! Cadence has two modes. While any conversation is still incomplete the engine
+//! is *catching up*: it takes the larger per-cycle budgets and reports
+//! `more_work`, which the caller answers by coming straight back round instead
+//! of sleeping. Once everything is backfilled it drops to the gentle budgets and
+//! the caller's normal minute-long sleep — steady state is tailing, and tailing
+//! is cheap. The speedup comes from not sleeping between cycles and not capping
+//! pages while catching up, never from raising the request rate:
+//! `request_spacing` stays at ~120 ms (~8 req/s), requests stay serialised, and
+//! a 429 that outlives the client's own retries stands the whole cycle down.
 //!
 //! The backfill terminates on an **empty** page, never a short one. Short pages
 //! occur mid-history; treating one as the end silently truncates the archive,
@@ -29,7 +47,7 @@
 //!   stored URL is worthless the moment the signature lapses — online as well as
 //!   off. Only the bytes on disk are an archive.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -37,7 +55,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::api::{ApiError, Cursor, GroupMeClient};
-use crate::model::{id_sort_key, ConversationKind, Message};
+use crate::model::{id_sort_key, Conversation, ConversationKind, Message};
 use crate::store::{Store, SyncState};
 
 #[derive(Debug, Clone)]
@@ -45,14 +63,29 @@ pub struct SyncConfig {
     /// Page size the client asks for. Used only to recognise a short tail page
     /// as "caught up"; the backfill deliberately ignores it.
     pub page_limit: u32,
-    /// Ceiling on media downloads per cycle, so a group that just posted 400
-    /// photos does not monopolise the cycle.
+    /// Ceiling on media downloads per cycle once the archive is caught up, so a
+    /// group that just posted 400 photos does not monopolise the cycle.
     pub media_per_cycle: usize,
-    /// Ceiling on backfill pages per conversation per cycle.
+    /// Media downloads per cycle while still catching up.
+    pub catchup_media_per_cycle: usize,
+    /// Ceiling on backfill pages per conversation per cycle once the archive is
+    /// caught up. Also the ceiling for a manual single-conversation refresh.
     pub backfill_pages_per_cycle: usize,
+    /// Backfill pages per conversation per cycle while still catching up.
+    ///
+    /// Deliberately an order of magnitude larger: the archive is the product,
+    /// and at five pages a minute a 142,000-message group takes five hours.
+    /// Raising it costs nothing in request rate — the cycle is still serialised
+    /// and still spaced by `request_spacing` — it only stops the engine from
+    /// idling between conversations.
+    pub catchup_backfill_pages_per_cycle: usize,
     /// Delay between API calls. The rate limit is undocumented and sits near
     /// 10 req/s per token, so requests are serialised and spaced.
     pub request_spacing: Duration,
+    /// How long the whole cycle stands down after a 429 that outlived the
+    /// client's own retry/backoff. Getting the user's real account flagged is a
+    /// far worse outcome than a slow backfill.
+    pub rate_limit_backoff: Duration,
 }
 
 impl Default for SyncConfig {
@@ -60,8 +93,11 @@ impl Default for SyncConfig {
         Self {
             page_limit: 100,
             media_per_cycle: 40,
+            catchup_media_per_cycle: 200,
             backfill_pages_per_cycle: 5,
+            catchup_backfill_pages_per_cycle: 50,
             request_spacing: Duration::from_millis(120),
+            rate_limit_backoff: Duration::from_secs(30),
         }
     }
 }
@@ -72,6 +108,19 @@ pub struct SyncReport {
     pub messages_inserted: usize,
     pub media_cached: usize,
     pub backfills_completed: usize,
+    /// Conversations whose history is still incomplete after this cycle.
+    pub conversations_backfilling: usize,
+    /// Messages the archive holds now, across every conversation.
+    pub total_archived: i64,
+    /// True while history remains to walk or media remains to fetch *and* this
+    /// cycle made progress. The caller loops immediately instead of sleeping
+    /// when it is set.
+    ///
+    /// Gated on progress on purpose. "Some conversation is incomplete" alone is
+    /// not enough: a group that 404s, or one whose cursor the server refuses to
+    /// advance, stays incomplete for the life of the process, and the caller
+    /// would then spin at the full request rate forever achieving nothing.
+    pub more_work: bool,
     pub errors: Vec<String>,
 }
 
@@ -127,16 +176,33 @@ impl SyncEngine {
         }
     }
 
-    /// One full pass: refresh the conversation list, sync each conversation,
-    /// then spend what is left of the media budget.
+    /// One full cycle: refresh the conversation list, tail everything nobody has
+    /// tailed yet, walk history, then spend the media budget.
     ///
     /// Deliberately infallible. A cycle that aborted on the first bad
     /// conversation would leave the rest of the archive permanently stale, so
-    /// failures are collected and reported. The one exception is a dead token:
-    /// every subsequent call would fail identically, and hammering a rejected
-    /// credential is how an account gets flagged.
+    /// failures are collected and reported. There are two exceptions, both of
+    /// which are about the account rather than the archive: a dead token, where
+    /// every subsequent call fails identically, and a 429 that outlived the
+    /// client's own retries. Hammering either is how an account gets flagged.
+    ///
+    /// `SyncReport::more_work` tells the caller whether to come straight back
+    /// round or fall back to its idle sleep.
     pub async fn sync_once(&self) -> SyncReport {
         let mut report = SyncReport::default();
+        let mut ids: Vec<String> = Vec::new();
+        let stood_down = self.run_cycle(&mut report, &mut ids).await;
+        self.finish(report, &ids, stood_down).await
+    }
+
+    /// The body of a cycle. Returns true when it stood down — a rejected token,
+    /// or a 429 the client's own retries could not ride out — which is the one
+    /// outcome the caller must not answer by coming straight back round.
+    ///
+    /// `ids` comes back filled with every conversation the cycle knew about, so
+    /// the progress fields can be computed once at the end rather than by
+    /// re-listing.
+    async fn run_cycle(&self, report: &mut SyncReport, ids: &mut Vec<String>) -> bool {
         let now = now_unix();
 
         match self.client.groups().await {
@@ -159,10 +225,10 @@ impl SyncEngine {
                 }
             }
             Err(e) => {
-                let fatal = matches!(e, ApiError::Unauthorized);
+                let stop = self.stand_down(&e).await;
                 report.errors.push(format!("listing groups: {e}"));
-                if fatal {
-                    return report;
+                if stop {
+                    return true;
                 }
             }
         }
@@ -189,10 +255,10 @@ impl SyncEngine {
                 }
             }
             Err(e) => {
-                let fatal = matches!(e, ApiError::Unauthorized);
+                let stop = self.stand_down(&e).await;
                 report.errors.push(format!("listing chats: {e}"));
-                if fatal {
-                    return report;
+                if stop {
+                    return true;
                 }
             }
         }
@@ -209,18 +275,95 @@ impl SyncEngine {
                 Ok(Ok(c)) => c,
                 Ok(Err(e)) => {
                     report.errors.push(format!("listing conversations: {e}"));
-                    return report;
+                    return true;
                 }
                 Err(e) => {
                     report.errors.push(format!("listing conversations: {e}"));
-                    return report;
+                    return true;
                 }
             }
         };
+        ids.extend(conversations.iter().map(|c| c.id.clone()));
 
-        for c in conversations {
+        // Every cursor in one hop: primary-key lookups under a single lock.
+        // This decides the shape of the whole cycle — which conversations have
+        // never been tailed, and whether the engine is still catching up — so it
+        // is read up front rather than discovered conversation by conversation.
+        let states = self.sync_states(ids).await;
+
+        // A conversation with no cursor and no completed backfill has never been
+        // tailed: either the archive is cold, or the user joined it since the
+        // last cycle. Either way it holds nothing the reader can show.
+        let never_tailed = |c: &Conversation| match states.get(&c.id) {
+            Some(s) => s.newest_id.is_none() && !s.backfill_complete,
+            None => true,
+        };
+        // A missing state is an unread row, not a complete one — assume the
+        // pessimistic answer rather than dropping to the gentle cadence.
+        let catching_up = conversations
+            .iter()
+            .any(|c| states.get(&c.id).map_or(true, |s| !s.backfill_complete));
+        let backfill_pages = if catching_up {
+            self.config.catchup_backfill_pages_per_cycle
+        } else {
+            self.config.backfill_pages_per_cycle
+        };
+
+        // --- Pass 1: recent everywhere ---------------------------------------
+        //
+        // Newest page only, for every conversation that has never been tailed,
+        // before any conversation walks backwards. Costs one request each and is
+        // the difference between a reader that fills in half a minute and one
+        // that fills over half an hour.
+        //
+        // Interruption-safe by construction: a conversation this pass never
+        // reached still has no cursor, so the next cycle sweeps it again.
+        let untouched: Vec<(String, ConversationKind)> = conversations
+            .iter()
+            .filter(|c| never_tailed(c))
+            .map(|c| (c.id.clone(), c.kind))
+            .collect();
+        let mut swept: HashMap<String, bool> = HashMap::with_capacity(untouched.len());
+        if !untouched.is_empty() {
+            log::info!(
+                "tailing {} conversation(s) before any backfill",
+                untouched.len()
+            );
+            for (id, kind) in &untouched {
+                match self
+                    .sync_conversation_detail(id, *kind, Pass::tail_only())
+                    .await
+                {
+                    Ok(outcome) => {
+                        report.messages_inserted += outcome.inserted;
+                        if outcome.backfill_completed {
+                            report.backfills_completed += 1;
+                        }
+                        swept.insert(id.clone(), true);
+                    }
+                    Err(e) => {
+                        swept.insert(id.clone(), false);
+                        let stop = self.stand_down(&e).await;
+                        report.errors.push(format!("conversation {id}: {e}"));
+                        if stop {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Pass 2: deep history --------------------------------------------
+        for c in &conversations {
             report.conversations_seen += 1;
-            match self.sync_conversation_detail(&c.id, c.kind).await {
+            let pass = match swept.get(&c.id) {
+                // Failed moments ago in pass 1. Asking again inside the same
+                // cycle would only put the identical error in the report twice.
+                Some(false) => continue,
+                Some(true) => Pass::backfill_only(backfill_pages),
+                None => Pass::full(backfill_pages),
+            };
+            match self.sync_conversation_detail(&c.id, c.kind, pass).await {
                 Ok(outcome) => {
                     report.messages_inserted += outcome.inserted;
                     if outcome.backfill_completed {
@@ -229,33 +372,144 @@ impl SyncEngine {
                     }
                 }
                 Err(e) => {
-                    let fatal = matches!(e, ApiError::Unauthorized);
+                    let stop = self.stand_down(&e).await;
                     report.errors.push(format!("conversation {}: {e}", c.id));
-                    if fatal {
-                        log::warn!("access token rejected; abandoning sync cycle");
-                        return report;
+                    if stop {
+                        return true;
                     }
                 }
             }
         }
 
-        report.media_cached = self.cache_pending_media().await;
+        let media_cap = if catching_up {
+            self.config.catchup_media_per_cycle
+        } else {
+            self.config.media_per_cycle
+        };
+        report.media_cached = self.cache_media_up_to(media_cap).await;
+        false
+    }
+
+    /// Cursors for every conversation, read under one lock.
+    ///
+    /// A row that fails to read is simply absent: callers treat "unknown" as
+    /// "never tailed", which costs one extra tail request and no correctness —
+    /// every conversation re-reads its own state before it is synced.
+    async fn sync_states(&self, ids: &[String]) -> HashMap<String, SyncState> {
+        let store = self.store.clone();
+        let wanted = ids.to_vec();
+        let read = tokio::task::spawn_blocking(move || {
+            let guard = lock_store(&store);
+            let mut out: HashMap<String, SyncState> = HashMap::with_capacity(wanted.len());
+            for id in wanted {
+                match guard.get_sync_state(&id) {
+                    Ok(s) => {
+                        out.insert(id, s);
+                    }
+                    Err(e) => log::warn!("reading sync state for {id}: {e}"),
+                }
+            }
+            out
+        })
+        .await;
+        match read {
+            Ok(states) => states,
+            Err(e) => {
+                log::warn!("reading sync state: {e}");
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Fills in the progress fields and decides whether the caller should come
+    /// straight back round.
+    async fn finish(&self, mut report: SyncReport, ids: &[String], stood_down: bool) -> SyncReport {
+        let store = self.store.clone();
+        let wanted = ids.to_vec();
+        // One hop for both reads. `total_message_count` is a COUNT over an
+        // index, and a cycle can never be shorter than the paced requests it
+        // just made, so it is noise next to the work it summarises.
+        let read = tokio::task::spawn_blocking(move || {
+            let guard = lock_store(&store);
+            let backfilling = wanted
+                .iter()
+                .filter(|id| {
+                    guard
+                        .get_sync_state(id)
+                        .map(|s| !s.backfill_complete)
+                        .unwrap_or(false)
+                })
+                .count();
+            (backfilling, guard.total_message_count().unwrap_or(0))
+        })
+        .await;
+        match read {
+            Ok((backfilling, total)) => {
+                report.conversations_backfilling = backfilling;
+                report.total_archived = total;
+            }
+            Err(e) => log::warn!("summarising archive progress: {e}"),
+        }
+
+        let progressed = report.messages_inserted > 0
+            || report.backfills_completed > 0
+            || report.media_cached > 0;
+        report.more_work = !stood_down
+            && progressed
+            && (report.conversations_backfilling > 0 || report.media_cached > 0);
         report
     }
 
+    /// Decides whether an API failure ends the cycle, and pays the 429 penalty
+    /// when there is one.
+    ///
+    /// A rejected token fails identically for everything that follows. A 429
+    /// that outlived the client's own retry/backoff means the account is already
+    /// over the line, and pressing on — even at 8 req/s — is how it gets
+    /// flagged. The pause lives here rather than in the caller so it applies
+    /// wherever the error surfaced.
+    async fn stand_down(&self, err: &ApiError) -> bool {
+        match err {
+            ApiError::Unauthorized => {
+                log::warn!("access token rejected; abandoning sync cycle");
+                true
+            }
+            ApiError::RateLimited { attempts } => {
+                log::warn!(
+                    "rate limited by GroupMe after {attempts} attempts; \
+                     pausing the sync cycle for {:?}",
+                    self.config.rate_limit_backoff
+                );
+                if !self.config.rate_limit_backoff.is_zero() {
+                    tokio::time::sleep(self.config.rate_limit_backoff).await;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Tail then backfill a single conversation. Returns rows written.
+    ///
+    /// The manual entry point, so it takes the gentle page budget: the catch-up
+    /// budget belongs to `sync_once`, which is the only caller that knows
+    /// whether the archive as a whole is still filling.
     pub async fn sync_conversation(
         &self,
         id: &str,
         kind: ConversationKind,
     ) -> Result<usize, ApiError> {
-        Ok(self.sync_conversation_detail(id, kind).await?.inserted)
+        Ok(self
+            .sync_conversation_detail(id, kind, Pass::full(self.config.backfill_pages_per_cycle))
+            .await?
+            .inserted)
     }
 
     async fn sync_conversation_detail(
         &self,
         id: &str,
         kind: ConversationKind,
+        pass: Pass,
     ) -> Result<ConversationOutcome, ApiError> {
         let mut state = {
             let store = self.store.clone();
@@ -268,40 +522,56 @@ impl SyncEngine {
         let mut outcome = ConversationOutcome::default();
 
         // --- Phase 1: tail -------------------------------------------------
-        loop {
-            // No cursor yet means nothing of this conversation is held at all;
-            // `Latest` seeds both ends in one request.
-            let seeding = state.newest_id.is_none();
-            let cursor = match &state.newest_id {
-                Some(newest) => Cursor::After(newest.clone()),
-                None => Cursor::Latest,
-            };
+        if pass.tail {
+            loop {
+                // No cursor yet means nothing of this conversation is held at
+                // all; `Latest` seeds both ends in one request.
+                let seeding = state.newest_id.is_none();
+                let cursor = match &state.newest_id {
+                    Some(newest) => Cursor::After(newest.clone()),
+                    None => Cursor::Latest,
+                };
 
-            // `Arc` so the page can be handed to the blocking writer without
-            // deep-copying 100 messages; `page.len()` is still needed after.
-            let page = Arc::new(self.fetch_page(id, kind, &cursor).await?);
-            if page.is_empty() {
-                break;
-            }
+                // `Arc` so the page can be handed to the blocking writer without
+                // deep-copying 100 messages; `page.len()` is still needed after.
+                let page = Arc::new(self.fetch_page(id, kind, &cursor).await?);
+                if page.is_empty() {
+                    if seeding {
+                        // `Latest` came back empty: the conversation holds
+                        // nothing at all, so there is no history to walk either.
+                        // Recording that now is what keeps an empty group out of
+                        // the never-tailed set — otherwise it would have no
+                        // cursor forever, re-triggering the recent-first pass
+                        // every cycle and never letting the engine go idle.
+                        state.backfill_complete = true;
+                        state.last_sync_at = Some(now_unix());
+                        outcome.backfill_completed = true;
+                        self.persist_state(&state).await?;
+                    }
+                    break;
+                }
 
-            let previous_newest = state.newest_id.clone();
-            outcome.inserted += self.write_page(id, Arc::clone(&page), &mut state).await?;
+                let previous_newest = state.newest_id.clone();
+                outcome.inserted += self.write_page(id, Arc::clone(&page), &mut state).await?;
 
-            if seeding {
-                // `Latest` is by definition the newest page; nothing follows it.
-                break;
-            }
-            if self.config.page_limit > 0 && page.len() < self.config.page_limit as usize {
-                // A short page while tailing means we have caught up. This is
-                // safe here and *not* safe in the backfill below: worst case we
-                // re-check next cycle, whereas a truncated backfill is silent.
-                break;
-            }
-            if state.newest_id == previous_newest {
-                // The server returned messages but the cursor did not advance,
-                // so `after_id` is not being honoured. Looping would never end.
-                log::warn!("tail cursor for {id} did not advance; stopping");
-                break;
+                if seeding {
+                    // `Latest` is by definition the newest page; nothing follows.
+                    break;
+                }
+                if self.config.page_limit > 0 && page.len() < self.config.page_limit as usize {
+                    // A short page while tailing means we have caught up. This
+                    // is safe here and *not* safe in the backfill below: worst
+                    // case we re-check next cycle, whereas a truncated backfill
+                    // is silent.
+                    break;
+                }
+                if state.newest_id == previous_newest {
+                    // The server returned messages but the cursor did not
+                    // advance, so `after_id` is not being honoured. Looping
+                    // would never end.
+                    log::warn!("tail cursor for {id} did not advance; stopping");
+                    break;
+                }
             }
         }
 
@@ -310,7 +580,7 @@ impl SyncEngine {
             return Ok(outcome);
         }
 
-        for _ in 0..self.config.backfill_pages_per_cycle {
+        for _ in 0..pass.backfill_pages {
             let cursor = match &state.oldest_id {
                 Some(oldest) => Cursor::Before(oldest.clone()),
                 None => Cursor::Latest,
@@ -323,12 +593,7 @@ impl SyncEngine {
                 state.backfill_complete = true;
                 state.last_sync_at = Some(now_unix());
                 outcome.backfill_completed = true;
-                let store = self.store.clone();
-                let snapshot = state.clone();
-                tokio::task::spawn_blocking(move || lock_store(&store).put_sync_state(&snapshot))
-                    .await
-                    .map_err(|e| join_error("writing sync state", e))?
-                    .map_err(|e| store_error("writing sync state", e))?;
+                self.persist_state(&state).await?;
                 break;
             }
 
@@ -343,12 +608,15 @@ impl SyncEngine {
         Ok(outcome)
     }
 
-    /// Download every queued asset the budget allows.
+    /// Download every queued asset the steady-state budget allows.
     ///
     /// Never fails the cycle: avatars return 403 routinely and attachment hosts
     /// time out, and neither is a reason to stop archiving text.
     pub async fn cache_pending_media(&self) -> usize {
-        let cap = self.config.media_per_cycle;
+        self.cache_media_up_to(self.config.media_per_cycle).await
+    }
+
+    async fn cache_media_up_to(&self, cap: usize) -> usize {
         if cap == 0 {
             return 0;
         }
@@ -417,6 +685,17 @@ impl SyncEngine {
             let (bytes, content_type) = match self.client.fetch_bytes(&url).await {
                 Ok(v) => v,
                 Err(e) => {
+                    if is_rate_limited(&e) {
+                        // The CDN throttling us is the same signal as the API
+                        // throttling us. `fetch_bytes` has no retry of its own,
+                        // so the whole media pass stands down for this cycle
+                        // rather than working through another 199 downloads.
+                        log::warn!("rate limited fetching media; ending the media pass");
+                        if !self.config.rate_limit_backoff.is_zero() {
+                            tokio::time::sleep(self.config.rate_limit_backoff).await;
+                        }
+                        break;
+                    }
                     if is_permanent(&e) {
                         self.blocked_media.lock().await.insert(url.clone());
                     }
@@ -459,6 +738,16 @@ impl SyncEngine {
     }
 
     // ---------------------------------------------------------------- internals
+
+    /// Persist cursors that changed without a page write behind them.
+    async fn persist_state(&self, state: &SyncState) -> Result<(), ApiError> {
+        let store = self.store.clone();
+        let snapshot = state.clone();
+        tokio::task::spawn_blocking(move || lock_store(&store).put_sync_state(&snapshot))
+            .await
+            .map_err(|e| join_error("writing sync state", e))?
+            .map_err(|e| store_error("writing sync state", e))
+    }
 
     async fn fetch_page(
         &self,
@@ -552,6 +841,41 @@ struct ConversationOutcome {
     backfill_completed: bool,
 }
 
+/// How much of one conversation a single visit is allowed to do.
+///
+/// The cycle visits a cold conversation twice: once to tail it alongside every
+/// other cold conversation, and again to walk its history. Splitting the two
+/// phases is what lets "recent everywhere" run before "complete anywhere"
+/// without paying for a second tail request.
+#[derive(Debug, Clone, Copy)]
+struct Pass {
+    tail: bool,
+    backfill_pages: usize,
+}
+
+impl Pass {
+    fn tail_only() -> Self {
+        Self {
+            tail: true,
+            backfill_pages: 0,
+        }
+    }
+
+    fn backfill_only(pages: usize) -> Self {
+        Self {
+            tail: false,
+            backfill_pages: pages,
+        }
+    }
+
+    fn full(pages: usize) -> Self {
+        Self {
+            tail: true,
+            backfill_pages: pages,
+        }
+    }
+}
+
 /// Recompute both cursors from a page.
 ///
 /// Every id is compared as an integer via `id_sort_key`. Lexicographic
@@ -587,12 +911,25 @@ fn advance_cursors(state: &mut SyncState, page: &[Message]) {
 /// A 4xx on an asset is the asset's final answer — GroupMe serves 403 for some
 /// avatars and 404 for objects that have aged out. Anything else may be
 /// transient and stays queued.
+///
+/// 429 is the exception inside that range: it is a statement about the *rate*,
+/// not the asset, and blocking the URL for the life of the process would
+/// permanently lose a perfectly good attachment because we asked too fast.
 fn is_permanent(err: &ApiError) -> bool {
     match err {
         ApiError::NotFound => true,
-        ApiError::Status { status, .. } => (400..500).contains(status),
+        ApiError::Status { status, .. } => (400..500).contains(status) && *status != 429,
         _ => false,
     }
+}
+
+/// `fetch_bytes` bypasses the retrying request path, so a throttled CDN arrives
+/// as a plain 429 status rather than `ApiError::RateLimited`.
+fn is_rate_limited(err: &ApiError) -> bool {
+    matches!(
+        err,
+        ApiError::RateLimited { .. } | ApiError::Status { status: 429, .. }
+    )
 }
 
 /// Content-addressed blob name. Hashing the URL keeps the filename stable
@@ -681,6 +1018,7 @@ mod tests {
     fn fast() -> SyncConfig {
         SyncConfig {
             request_spacing: Duration::ZERO,
+            rate_limit_backoff: Duration::ZERO,
             ..Default::default()
         }
     }
@@ -1197,6 +1535,208 @@ mod tests {
         assert_eq!(report.messages_inserted, 2);
         assert_eq!(report.backfills_completed, 1);
         assert_eq!(count_in(&store, "g2"), 2);
+    }
+
+    // --- Catch-up mode ---------------------------------------------------
+
+    #[tokio::test]
+    async fn more_work_is_set_until_every_backfill_is_complete() {
+        // The caller loops immediately on `more_work` instead of sleeping a
+        // minute, so a cycle that leaves history unwalked has to say so.
+        let server = MockServer::start().await;
+        mount_conversation_lists(&server, json!([{ "id": "g1", "name": "One" }])).await;
+        mount_cursor(
+            &server,
+            G1_MESSAGES,
+            "before_id",
+            "201",
+            vec![msg("101", "older one"), msg("102", "older two")],
+        )
+        .await;
+        mount_cursor(&server, G1_MESSAGES, "before_id", "101", vec![]).await;
+        mount_cursor(&server, G1_MESSAGES, "after_id", "202", vec![]).await;
+        mount_latest(
+            &server,
+            G1_MESSAGES,
+            vec![msg("201", "recent one"), msg("202", "recent two")],
+        )
+        .await;
+
+        let store = memory_store();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(
+            &server,
+            store.clone(),
+            &dir,
+            SyncConfig {
+                catchup_backfill_pages_per_cycle: 1,
+                ..fast()
+            },
+        );
+
+        let first = engine.sync_once().await;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert!(
+            first.more_work,
+            "history remains but the caller was told to go to sleep"
+        );
+        assert_eq!(first.conversations_backfilling, 1);
+        assert_eq!(first.total_archived, 4);
+
+        let second = engine.sync_once().await;
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(second.backfills_completed, 1);
+        assert_eq!(second.conversations_backfilling, 0);
+        assert!(
+            !second.more_work,
+            "a fully archived account must fall back to the gentle cadence"
+        );
+        assert_eq!(second.total_archived, 4);
+    }
+
+    #[tokio::test]
+    async fn a_cold_archive_tails_every_conversation_before_any_backfill() {
+        // The failure this prevents: conversation-at-a-time processing, where
+        // the last chat in the list shows nothing until every earlier one has
+        // spent its whole backfill budget.
+        let server = MockServer::start().await;
+        mount_conversation_lists(
+            &server,
+            json!([
+                { "id": "g1", "name": "First", "updated_at": 200 },
+                { "id": "g2", "name": "Second", "updated_at": 100 },
+            ]),
+        )
+        .await;
+        mount_cursor(
+            &server,
+            G1_MESSAGES,
+            "before_id",
+            "301",
+            vec![msg("201", "g1 old"), msg("202", "g1 old")],
+        )
+        .await;
+        mount_cursor(&server, G1_MESSAGES, "before_id", "201", vec![]).await;
+        mount_latest(
+            &server,
+            G1_MESSAGES,
+            vec![msg("301", "g1 new"), msg("302", "g1 new")],
+        )
+        .await;
+        mount_cursor(&server, G2_MESSAGES, "before_id", "401", vec![]).await;
+        mount_latest(
+            &server,
+            G2_MESSAGES,
+            vec![msg("401", "g2 new"), msg("402", "g2 new")],
+        )
+        .await;
+
+        let store = memory_store();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&server, store.clone(), &dir, fast());
+
+        let report = engine.sync_once().await;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let messages: Vec<String> = requests
+            .iter()
+            .filter(|r| r.url.path().contains("/groups/") && r.url.path().ends_with("/messages"))
+            .map(|r| format!("{}?{}", r.url.path(), r.url.query().unwrap_or("")))
+            .collect();
+        let first_backfill = messages
+            .iter()
+            .position(|q| q.contains("before_id"))
+            .expect("no backfill ran at all");
+        let tails = &messages[..first_backfill];
+        for group in ["/groups/g1/messages", "/groups/g2/messages"] {
+            assert!(
+                tails.iter().any(|q| q.starts_with(group)),
+                "{group} had not been tailed before the first backfill request: {messages:?}"
+            );
+        }
+        assert_eq!(count_in(&store, "g1"), 4);
+        assert_eq!(count_in(&store, "g2"), 2);
+    }
+
+    #[tokio::test]
+    async fn the_catch_up_cap_applies_while_catching_up_and_not_once_done() {
+        let server = MockServer::start().await;
+        mount_conversation_lists(&server, json!([{ "id": "g1", "name": "Deep" }])).await;
+        for (from, page) in [
+            ("501", vec![msg("401", "d"), msg("402", "d")]),
+            ("401", vec![msg("301", "c"), msg("302", "c")]),
+            ("301", vec![msg("201", "b"), msg("202", "b")]),
+            ("201", vec![]),
+        ] {
+            mount_cursor(&server, G1_MESSAGES, "before_id", from, page).await;
+        }
+        mount_cursor(&server, G1_MESSAGES, "after_id", "502", vec![]).await;
+        mount_latest(&server, G1_MESSAGES, vec![msg("501", "a"), msg("502", "a")]).await;
+
+        let store = memory_store();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(
+            &server,
+            store.clone(),
+            &dir,
+            SyncConfig {
+                backfill_pages_per_cycle: 1,
+                catchup_backfill_pages_per_cycle: 3,
+                ..fast()
+            },
+        );
+
+        engine.sync_once().await;
+        assert_eq!(
+            queries_containing(&server, "before_id").await,
+            3,
+            "an incomplete archive was held to the gentle steady-state cap"
+        );
+
+        let second = engine.sync_once().await;
+        assert_eq!(queries_containing(&server, "before_id").await, 4);
+        assert!(!second.more_work);
+        assert_eq!(count_in(&store, "g1"), 8);
+
+        // Caught up: the cadence drops to tail-only, so no page budget of
+        // either size is spent. The gentle cap still governs the manual
+        // single-conversation path — see `backfill_is_capped_per_cycle`.
+        engine.sync_once().await;
+        assert_eq!(
+            queries_containing(&server, "before_id").await,
+            4,
+            "a completed archive kept walking backwards"
+        );
+        assert_eq!(
+            queries_containing(&server, "after_id").await,
+            2,
+            "steady state must still tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_conversation_is_recorded_as_complete() {
+        // A group with no messages never gets a cursor, so without this it would
+        // look "never tailed" forever: swept again every cycle, and counted as
+        // outstanding work that keeps the caller looping at full speed.
+        let server = MockServer::start().await;
+        mount_conversation_lists(&server, json!([{ "id": "g1", "name": "Silent" }])).await;
+        mount_latest(&server, G1_MESSAGES, vec![]).await;
+
+        let store = memory_store();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&server, store.clone(), &dir, fast());
+
+        let report = engine.sync_once().await;
+        assert!(state_of(&store, "g1").backfill_complete);
+        assert_eq!(report.conversations_backfilling, 0);
+        assert!(!report.more_work);
+        assert_eq!(
+            paths_ending_with(&server, "/groups/g1/messages").await,
+            1,
+            "an empty conversation cost more than the one request that proved it empty"
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Archive Status — GroupMe</title>
+  <style>
+    :root {
+      --accent: #3c16d3;
+      --bg: #ffffff;
+      --fg: #16161d;
+      --muted: #6b6b7b;
+      --card: #f5f5f8;
+      --border: #e3e3ea;
+      --ok: #15803d;
+      --ok-bg: #f0fdf4;
+      --ok-border: #bbf7d0;
+      --warn: #b45309;
+      --warn-bg: #fffbeb;
+      --warn-border: #fde68a;
+      --info: #1d4ed8;
+      --info-bg: #eff6ff;
+      --info-border: #bfdbfe;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e0e14;
+        --fg: #f2f2f6;
+        --muted: #9a9aab;
+        --card: #191922;
+        --border: #2a2a36;
+        --ok: #4ade80;
+        --ok-bg: #061610;
+        --ok-border: #14532d;
+        --warn: #fbbf24;
+        --warn-bg: #130e00;
+        --warn-border: #78350f;
+        --info: #93c5fd;
+        --info-bg: #050f1e;
+        --info-border: #1e3a5f;
+      }
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header (drag region) ── */
+    .header {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      cursor: default;
+    }
+    .header-identity {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .8125rem;
+      font-weight: 600;
+      letter-spacing: -.01em;
+    }
+    .app-icon {
+      width: 22px; height: 22px;
+      border-radius: 5px;
+      background: var(--accent);
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+    }
+    .app-icon svg { display: block; }
+    .close-btn {
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+      transition: background .12s, color .12s;
+    }
+    .close-btn:hover { background: var(--card); color: var(--fg); }
+    .close-btn:active { filter: brightness(.9); }
+
+    /* ── Content ── */
+    .content {
+      flex: 1;
+      padding: 14px 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    /* ── Verdict card ── */
+    .verdict {
+      border-radius: 9px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      background: var(--card);
+    }
+    .verdict[data-level="ok"]      { background: var(--ok-bg);   border-color: var(--ok-border); }
+    .verdict[data-level="warn"]    { background: var(--warn-bg);  border-color: var(--warn-border); }
+    .verdict[data-level="info"]    { background: var(--info-bg);  border-color: var(--info-border); }
+    .verdict[data-level="neutral"] { background: var(--card);     border-color: var(--border); }
+
+    .verdict-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .verdict-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+    }
+    .verdict[data-level="ok"]   .verdict-dot { background: var(--ok); }
+    .verdict[data-level="warn"] .verdict-dot { background: var(--warn); }
+    .verdict[data-level="info"] .verdict-dot { background: var(--info); }
+
+    #verdict-text {
+      font-size: .8125rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .verdict[data-level="ok"]   #verdict-text { color: var(--ok); }
+    .verdict[data-level="warn"] #verdict-text { color: var(--warn); }
+    .verdict[data-level="info"] #verdict-text { color: var(--info); }
+
+    #verdict-hint {
+      font-size: .73rem;
+      color: var(--muted);
+      margin-top: 4px;
+      padding-left: 14px;
+      line-height: 1.4;
+    }
+
+    /* ── Stats card ── */
+    .stats-card {
+      background: var(--card);
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      gap: 16px;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label {
+      font-size: .75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .stat-value-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      flex-shrink: 0;
+    }
+    .stat-value {
+      font-size: .8125rem;
+      font-weight: 500;
+      text-align: right;
+    }
+    .stat-sub {
+      font-size: .7rem;
+      color: var(--muted);
+      text-align: right;
+      margin-top: 1px;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .footer-note {
+      font-size: .7rem;
+      color: var(--muted);
+    }
+
+    /* Live "updated" badge */
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: .7rem;
+      color: var(--ok);
+      opacity: 0;
+      transition: opacity .25s ease;
+      pointer-events: none;
+    }
+    .live-badge.show { opacity: 1; }
+    .live-dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    @keyframes dot-pop {
+      0%   { transform: scale(2.2); opacity: 0; }
+      40%  { transform: scale(1.1); opacity: 1; }
+      100% { transform: scale(1);   opacity: 1; }
+    }
+    .live-badge.show .live-dot { animation: dot-pop .35s ease-out; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .close-btn             { transition: none; }
+      .live-badge            { transition: none; }
+      .live-badge.show .live-dot { animation: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── HEADER — entire row is the drag region ── -->
+<div class="header" data-tauri-drag-region>
+  <div class="header-identity">
+    <div class="app-icon" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+           stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/>
+      </svg>
+    </div>
+    GroupMe Archive
+  </div>
+  <button class="close-btn" id="close-btn" aria-label="Close" title="Close (Esc)">
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"
+         stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+      <line x1="1" y1="1" x2="9" y2="9"/>
+      <line x1="9" y1="1" x2="1" y2="9"/>
+    </svg>
+  </button>
+</div>
+
+<!-- ── CONTENT ── -->
+<div class="content">
+
+  <!-- Top-line verdict -->
+  <div class="verdict" id="verdict" data-level="neutral" role="status">
+    <div class="verdict-row">
+      <span class="verdict-dot" aria-hidden="true"></span>
+      <span id="verdict-text">Loading…</span>
+    </div>
+    <div id="verdict-hint" hidden></div>
+  </div>
+
+  <!-- Stats table -->
+  <div class="stats-card">
+    <div class="stat-row">
+      <span class="stat-label">Account</span>
+      <div class="stat-value-wrap">
+        <span class="stat-value" id="stat-account">—</span>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Conversations</span>
+      <div class="stat-value-wrap">
+        <span class="stat-value" id="stat-conversations">—</span>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Messages archived</span>
+      <div class="stat-value-wrap">
+        <span class="stat-value" id="stat-messages">—</span>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Last synced</span>
+      <div class="stat-value-wrap">
+        <span class="stat-value" id="stat-rel-time">—</span>
+        <span class="stat-sub" id="stat-abs-time"></span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── FOOTER ── -->
+<div class="footer">
+  <span class="footer-note">Syncs automatically every 60 seconds.</span>
+  <span class="live-badge" id="live-badge" aria-live="polite" aria-atomic="true">
+    <span class="live-dot" aria-hidden="true"></span>
+    updated just now
+  </span>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // Sample data used when the page is opened directly in a browser (no Tauri).
+  var SAMPLE_STATS = {
+    conversations: 42,
+    messages: 1847,
+    last_sync_at: Math.floor(Date.now() / 1000) - 90,
+    account_name: 'Sample User'
+  };
+
+  var hasTauri = typeof window.__TAURI__ !== 'undefined';
+
+  // ── Pure helpers ──
+
+  function relTime(unixSec) {
+    if (unixSec == null) return '—';
+    var ageMs = Date.now() - unixSec * 1000;
+    var s = Math.floor(ageMs / 1000);
+    if (s < 60) return 'just now';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m === 1 ? '1 minute ago' : m + ' minutes ago';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h === 1 ? '1 hour ago' : h + ' hours ago';
+    var d = Math.floor(h / 24);
+    if (d === 1) return 'yesterday';
+    return d + ' days ago';
+  }
+
+  function absTime(unixSec) {
+    if (unixSec == null) return '';
+    return new Date(unixSec * 1000).toLocaleString(undefined, {
+      dateStyle: 'short',
+      timeStyle: 'short'
+    });
+  }
+
+  function fmtNum(n) {
+    if (n == null) return '—';
+    return n.toLocaleString();
+  }
+
+  // Derive the top-line verdict from stats.
+  // Returns { level: 'ok'|'warn'|'info'|'neutral', text, hint }.
+  function getVerdict(stats) {
+    var name  = stats.account_name;
+    var msgs  = stats.messages;
+    var last  = stats.last_sync_at;
+
+    if (!name && !msgs) {
+      return {
+        level: 'neutral',
+        text: 'Not signed in yet',
+        hint: 'Sign in to GroupMe in the main window to start the archive.'
+      };
+    }
+    if (!msgs) {
+      return {
+        level: 'info',
+        text: 'Signed in, nothing archived yet',
+        hint: 'The first sync can take a few minutes — check back shortly.'
+      };
+    }
+    if (last != null) {
+      var staleMs = Date.now() - last * 1000;
+      if (staleMs > 10 * 60 * 1000) {
+        return {
+          level: 'warn',
+          text: 'Sync may be stalled',
+          hint: 'Last sync was more than 10 minutes ago. Restart the app if this persists.'
+        };
+      }
+    }
+    return {
+      level: 'ok',
+      text: 'Archive is up to date',
+      hint: ''
+    };
+  }
+
+  // ── State ──
+
+  var _stats     = null;
+  var _pulseTimer = null;
+
+  // ── DOM refs (queried once) ──
+
+  var elVerdict       = document.getElementById('verdict');
+  var elVerdictText   = document.getElementById('verdict-text');
+  var elVerdictHint   = document.getElementById('verdict-hint');
+  var elAccount       = document.getElementById('stat-account');
+  var elConvs         = document.getElementById('stat-conversations');
+  var elMsgs          = document.getElementById('stat-messages');
+  var elRelTime       = document.getElementById('stat-rel-time');
+  var elAbsTime       = document.getElementById('stat-abs-time');
+  var elLiveBadge     = document.getElementById('live-badge');
+
+  // ── Render ──
+
+  function renderVerdict(stats) {
+    var v = getVerdict(stats);
+    elVerdict.dataset.level = v.level;
+    elVerdictText.textContent = v.text;   // textContent — safe
+    elVerdictHint.textContent = v.hint;   // textContent — safe
+    elVerdictHint.hidden = !v.hint;
+  }
+
+  function renderTime(unixSec) {
+    elRelTime.textContent = relTime(unixSec);
+    elAbsTime.textContent = absTime(unixSec);
+  }
+
+  function render(stats) {
+    _stats = stats;
+    renderVerdict(stats);
+    elAccount.textContent       = stats.account_name || '—';  // textContent — safe
+    elConvs.textContent         = fmtNum(stats.conversations);
+    elMsgs.textContent          = fmtNum(stats.messages);
+    renderTime(stats.last_sync_at);
+  }
+
+  // Called every 30 s to keep relative times accurate without a network round-trip.
+  function tickRelTime() {
+    if (!_stats) return;
+    renderTime(_stats.last_sync_at);
+    // Re-evaluate the stale threshold without touching the network.
+    renderVerdict(_stats);
+  }
+
+  // ── Live pulse badge ──
+
+  function showPulse() {
+    elLiveBadge.classList.remove('show');
+    // Force reflow so the dot animation restarts on every event.
+    void elLiveBadge.offsetWidth;
+    elLiveBadge.classList.add('show');
+    clearTimeout(_pulseTimer);
+    _pulseTimer = setTimeout(function () {
+      elLiveBadge.classList.remove('show');
+    }, 4000);
+  }
+
+  // ── Data loading ──
+
+  async function loadStats() {
+    try {
+      var stats = hasTauri
+        ? await window.__TAURI__.core.invoke('archive_stats')
+        : SAMPLE_STATS;
+      render(stats);
+    } catch (err) {
+      elVerdict.dataset.level = 'warn';
+      elVerdictText.textContent = 'Could not load archive status';
+      elVerdictHint.textContent = String(err);  // textContent — safe
+      elVerdictHint.hidden = false;
+    }
+  }
+
+  async function onSynced() {
+    await loadStats();
+    showPulse();
+  }
+
+  // ── Window controls ──
+
+  async function hideWindow() {
+    if (hasTauri) {
+      try {
+        await window.__TAURI__.window.getCurrentWindow().hide();
+      } catch (_) {
+        // Swallow — worst case the window stays visible until the user alt-F4s it.
+      }
+    }
+  }
+
+  document.getElementById('close-btn').addEventListener('click', hideWindow);
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') hideWindow();
+  });
+
+  // ── Boot ──
+
+  async function init() {
+    await loadStats();
+
+    if (hasTauri) {
+      try {
+        await window.__TAURI__.event.listen('archive://synced', onSynced);
+      } catch (e) {
+        console.warn('GroupMe status: could not subscribe to archive://synced', e);
+      }
+    }
+
+    // Keep "3 minutes ago" etc. accurate while the panel is open.
+    setInterval(tickRelTime, 30000);
+  }
+
+  init();
+}());
+</script>
+</body>
+</html>

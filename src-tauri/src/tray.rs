@@ -1,9 +1,10 @@
 //! System tray, close-to-tray, and new-message toasts.
 //!
 //! The tray is the app's persistent presence: a status line naming the signed-in
-//! account and whether we are reading live or from the archive, a Show entry, the
-//! two user-facing toggles (notifications, start-with-Windows), an updater hook,
-//! and Quit.
+//! account and whether we are reading live or from the archive, a Show entry, a
+//! sync-status window, the two user-facing toggles (notifications,
+//! start-with-Windows), an offline simulation for testing, an updater hook, and
+//! Quit.
 //!
 //! ## Close-to-tray
 //! The window's X does **not** quit. `CloseRequested` on the main window is
@@ -36,11 +37,17 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 
 use crate::commands::SharedStore;
+use crate::connectivity;
 
 /// Label of the window declared in `tauri.conf.json`.
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "main";
 const APP_NAME: &str = "GroupMe";
+
+/// The sync-status window, built on demand by [`open_status_window`]. Its page
+/// reads the archive through the existing `archive_stats` command.
+const STATUS_WINDOW: &str = "status";
+const STATUS_PAGE: &str = "status.html";
 
 /// Emitted when the user picks "Check for updates…"; the updater module owns the
 /// rest. Nothing about updating happens in this file.
@@ -49,6 +56,13 @@ pub const EVENT_CHECK_UPDATES: &str = "app://check-updates";
 /// Whoever registers autostart should call [`set_autostart_checked`] with the
 /// real outcome so a failed registration does not leave the item lying.
 pub const EVENT_TOGGLE_AUTOSTART: &str = "app://toggle-autostart";
+/// Emitted with `{"forced": bool}` when the user flips "Simulate offline".
+///
+/// `connectivity::set_forced_offline` has already been called by the time this
+/// lands — the payload is informational. Whoever owns the monitor should answer
+/// it with `ConnectivityMonitor::refresh_override()` so the change takes effect
+/// now instead of at the next probe tick.
+pub const EVENT_CONNECTIVITY_OVERRIDE: &str = "app://connectivity-override";
 
 /// Archive `meta` key backing the notification toggle.
 const META_NOTIFY: &str = "notify_on_message";
@@ -70,6 +84,7 @@ struct TrayHandles {
     status: MenuItem<Wry>,
     notify: CheckMenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
+    simulate: CheckMenuItem<Wry>,
     /// Base tray icon; `None` only if the bundled PNG and the default window
     /// icon are both unavailable.
     icon_base: Option<Image<'static>>,
@@ -127,7 +142,7 @@ pub fn set_connectivity(_app: &tauri::AppHandle, state: &str) {
     let Some(lock) = HANDLES.get() else { return };
     let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
     h.connectivity = state.to_string();
-    let label = status_label(h.account.as_deref(), state);
+    let label = status_label_for(h.account.as_deref(), state, connectivity::forced_offline());
     let _ = h.status.set_text(label.as_str());
     let tip = tooltip_for(h.unread, state);
     let _ = h.tray.set_tooltip(Some(tip.as_str()));
@@ -139,8 +154,40 @@ pub fn set_account(name: Option<&str>) {
     let Some(lock) = HANDLES.get() else { return };
     let mut h = lock.lock().unwrap_or_else(|e| e.into_inner());
     h.account = name.map(str::to_string);
-    let label = status_label(h.account.as_deref(), &h.connectivity);
+    let label = status_label_for(
+        h.account.as_deref(),
+        &h.connectivity,
+        connectivity::forced_offline(),
+    );
     let _ = h.status.set_text(label.as_str());
+}
+
+/// Opens (or focuses, if already open) the sync status window.
+pub fn open_status_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window(STATUS_WINDOW) {
+        // Reused rather than rebuilt: building a second window with the same
+        // label fails, and the user asked to see it, not to be told why not.
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        STATUS_WINDOW,
+        tauri::WebviewUrl::App(STATUS_PAGE.into()),
+    )
+    .title("GroupMe — Sync status")
+    .inner_size(420.0, 380.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .center()
+    .build()?;
+
+    Ok(())
 }
 
 /// Fire an OS notification for a new message. Silently drops the toast when
@@ -229,6 +276,8 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
         None::<&str>,
     )?;
     let show_i = MenuItem::with_id(app, "show", "Show GroupMe", true, None::<&str>)?;
+    let status_window_i =
+        MenuItem::with_id(app, "sync_status", "Sync status…", true, None::<&str>)?;
     let updates_i = MenuItem::with_id(
         app,
         "check_updates",
@@ -252,6 +301,16 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
         AUTOSTART.load(Ordering::Relaxed),
         None::<&str>,
     )?;
+    // Always starts unchecked: the override is never persisted, so a fresh
+    // process is never simulating.
+    let simulate_i = CheckMenuItem::with_id(
+        app,
+        "simulate_offline",
+        "Simulate offline (testing)",
+        true,
+        connectivity::forced_offline(),
+        None::<&str>,
+    )?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -263,10 +322,12 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
             &status_i,
             &sep1,
             &show_i,
+            &status_window_i,
             &updates_i,
             &sep2,
             &notify_i,
             &autostart_i,
+            &simulate_i,
             &sep3,
             &quit_i,
         ],
@@ -280,6 +341,11 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_and_focus(app),
+            "sync_status" => {
+                if let Err(e) = open_status_window(app) {
+                    log::warn!("tray: could not open the sync status window: {e}");
+                }
+            }
             "check_updates" => {
                 if let Err(e) = app.emit(EVENT_CHECK_UPDATES, ()) {
                     log::warn!("tray: could not emit {EVENT_CHECK_UPDATES}: {e}");
@@ -287,6 +353,7 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
             }
             "notify_toggle" => toggle_notify(app),
             "autostart_toggle" => toggle_autostart(app),
+            "simulate_offline" => toggle_simulate_offline(app),
             "quit" => quit(app),
             _ => {}
         })
@@ -315,6 +382,7 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
         status: status_i,
         notify: notify_i,
         autostart: autostart_i,
+        simulate: simulate_i,
         icon_base,
         icon_badged: HashMap::new(),
         last_badge: None,
@@ -354,13 +422,37 @@ fn quit(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
-fn show_and_focus(app: &tauri::AppHandle) {
+/// Bring the main window back from either hidden (close-to-tray) or minimized.
+///
+/// Order is load-bearing. `show()` maps to `ShowWindow(SW_SHOW)`, which on a
+/// **minimized** window makes it "visible" while leaving it iconic — so calling
+/// it first and then `unminimize()` restored nothing, and every route back to
+/// the app (tray icon, tray menu, relaunch) silently did nothing. Restore
+/// first, then show, then focus.
+pub fn show_and_focus(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        log::warn!("tray: no `{MAIN_WINDOW}` window to show");
         return;
     };
-    let _ = window.show();
+
     let _ = window.unminimize();
+    let _ = window.show();
     let _ = window.set_focus();
+
+    // Windows refuses SetForegroundWindow to a process that does not own the
+    // foreground, so `set_focus` can restore the window *behind* whatever the
+    // user is looking at — indistinguishable from nothing happening. Briefly
+    // asserting always-on-top is the standard way to raise it without that
+    // restriction; it is toggled straight back so the window does not actually
+    // stay pinned.
+    #[cfg(windows)]
+    {
+        let pinned = window.is_always_on_top().unwrap_or(false);
+        if !pinned {
+            let _ = window.set_always_on_top(true);
+            let _ = window.set_always_on_top(false);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +487,39 @@ fn toggle_autostart(app: &tauri::AppHandle) {
         serde_json::json!({ "enabled": desired }),
     ) {
         log::warn!("tray: could not emit {EVENT_TOGGLE_AUTOSTART}: {e}");
+    }
+}
+
+/// Pin connectivity to Offline so the archive reader can be exercised without
+/// unplugging anything.
+///
+/// Deliberately NOT written to the archive `meta` table, and deliberately not
+/// mirrored in a local static either — `connectivity` owns the flag, and a
+/// simulation that survived a restart would be indistinguishable from a real,
+/// permanent outage to whoever inherits the machine.
+fn toggle_simulate_offline(app: &tauri::AppHandle) {
+    let desired = !connectivity::forced_offline();
+    connectivity::set_forced_offline(desired);
+    if let Some(lock) = HANDLES.get() {
+        let h = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = h.simulate.set_checked(desired);
+        // Redraw now rather than waiting for the monitor's own transition to
+        // come back through `set_connectivity`. Switching the simulation off
+        // falls back to the last state the monitor reported, which the re-probe
+        // triggered by the event below corrects within a tick.
+        let shown = if desired {
+            "offline"
+        } else {
+            h.connectivity.as_str()
+        };
+        let label = status_label_for(h.account.as_deref(), shown, desired);
+        let _ = h.status.set_text(label.as_str());
+    }
+    if let Err(e) = app.emit(
+        EVENT_CONNECTIVITY_OVERRIDE,
+        serde_json::json!({ "forced": desired }),
+    ) {
+        log::warn!("tray: could not emit {EVENT_CONNECTIVITY_OVERRIDE}: {e}");
     }
 }
 
@@ -453,6 +578,18 @@ fn status_label(account: Option<&str>, state: &str) -> String {
     match account.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => format!("{name} — {}", connectivity_text(state)),
         None => connectivity_text(state).to_string(),
+    }
+}
+
+/// [`status_label`], marked when the outage is simulated rather than real.
+/// Without the marker the only way to tell the two apart is to remember flipping
+/// a checkbox, which nobody does a week later.
+fn status_label_for(account: Option<&str>, state: &str, simulated: bool) -> String {
+    let label = status_label(account, state);
+    if simulated {
+        format!("{label} (simulated)")
+    } else {
+        label
     }
 }
 
@@ -749,6 +886,46 @@ mod tests {
         assert_eq!(status_label(Some("   "), "online"), "Online");
         // Before the first probe lands.
         assert_eq!(status_label(None, ""), "Connecting…");
+    }
+
+    #[test]
+    fn a_simulated_outage_is_labelled_as_one() {
+        assert_eq!(
+            status_label_for(None, "offline", true),
+            "Offline — reading archive (simulated)"
+        );
+        assert_eq!(
+            status_label_for(Some("Example Sender"), "offline", true),
+            "Example Sender — Offline — reading archive (simulated)"
+        );
+        // Unsimulated is byte-for-byte what it was before the toggle existed.
+        for state in ["online", "degraded", "offline", ""] {
+            assert_eq!(
+                status_label_for(Some("Example Sender"), state, false),
+                status_label(Some("Example Sender"), state)
+            );
+        }
+    }
+
+    /// A simulation that outlived the process would present as a permanent,
+    /// inexplicable outage — and the tray checkbox is the last place anyone
+    /// would think to look. Enforced here rather than left to review.
+    #[test]
+    fn the_offline_simulation_is_never_persisted() {
+        let production = include_str!("tray.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let body = production
+            .split("fn toggle_simulate_offline")
+            .nth(1)
+            .expect("toggle_simulate_offline must exist");
+        // Functions end at a `}` in column 0.
+        let body = &body[..body.find("\n}").unwrap_or(body.len())];
+        assert!(
+            !body.contains("write_meta"),
+            "the offline simulation must not reach the archive `meta` table"
+        );
     }
 
     #[test]

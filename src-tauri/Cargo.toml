@@ -1,6 +1,6 @@
 [package]
 name = "groupme-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "GroupMe for Windows — native desktop shell (Tauri 2) with a local SQLite archive for offline reading"
 authors = ["Shalom Karr"]
 # AGPL-3.0-only WITH the Commons Clause condition. Commons Clause has no SPDX
@@ -42,9 +42,27 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # is only worth having if it is searchable.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# native-tls, NOT rustls-tls.
+#
+# `rustls-tls` validates against webpki-roots -- a Mozilla root store compiled
+# into the binary -- and ignores the Windows certificate store completely. On
+# any machine behind TLS inspection (corporate proxy, security appliance, AV
+# with HTTPS scanning) the presented chain is issued by a private root that
+# lives in the Windows store, so rustls rejects it with
+# `invalid peer certificate: UnknownIssuer` while Edge, Chrome and PowerShell
+# on the same machine all succeed.
+#
+# That failure is total and silent here: no API reachability means the router
+# never reaches GroupMe, so no token is captured, so nothing ever syncs and the
+# archive stays empty.
+#
+# native-tls uses schannel on Windows -- the same TLS stack, and the same trust
+# store, as every other application on the machine. For a Windows-only desktop
+# app that is the correct default: it should work wherever the user's browser
+# already works.
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
-  "rustls-tls",
+  "native-tls",
   "gzip",
   "stream",
 ] }

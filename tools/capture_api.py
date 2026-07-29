@@ -345,6 +345,18 @@ def main() -> int:
     opts.add_argument("--start-maximized")
     opts.add_argument("--ignore-certificate-errors")
 
+    # CDP performance logging, for websocket frames.
+    #
+    # GroupMe's realtime layer is Faye over a websocket. selenium-wire proxies
+    # HTTP and cannot see inside an upgraded connection, and forcing the
+    # long-polling fallback does not work either: GroupMe's own edge returns
+    # nginx 504s on the held request, because their client always upgrades and
+    # the long-poll path is not really supported.
+    #
+    # CDP sees the frames directly -- Network.webSocketFrameSent /
+    # webSocketFrameReceived carry payloadData with no interception at all.
+    opts.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
+
     sw_opts = {
         "suppress_connection_errors": True,
         "verify_ssl": False,
@@ -399,13 +411,21 @@ def main() -> int:
     print("=" * 70, flush=True)
     print("  LOG IN to GroupMe in the Chrome window that just opened.", flush=True)
     print("", flush=True)
-    print("  Then exercise the app so each endpoint gets recorded:", flush=True)
-    print("    - open a group, scroll UP to force history paging", flush=True)
-    print("    - open a DM, scroll up there too", flush=True)
-    print("    - open the members list / group settings", flush=True)
-    print("    - like a message, reply to one, send one", flush=True)
-    print("    - use search; open Events, Polls, Copilot if present", flush=True)
-    print("    - mark something read, mute a group, change an avatar", flush=True)
+    print("  REALTIME (the blocking one -- websocket frames):", flush=True)
+    print("    - leave a group open and HAVE SOMEONE SEND YOU A MESSAGE", flush=True)
+    print("      (or send yourself one from your phone)", flush=True)
+    print("    - do the same in a DM -- the DM channel name is still unknown", flush=True)
+    print("    - have someone react to a message while you watch", flush=True)
+    print("", flush=True)
+    print("  WRITES not yet captured (needed for a full client):", flush=True)
+    print("    - upload an image, and a file if you can", flush=True)
+    print("    - create a poll, then vote in it", flush=True)
+    print("    - create an event, then RSVP", flush=True)
+    print("    - start typing and pause (typing indicator)", flush=True)
+    print("    - change a group's name/avatar; add or remove a member", flush=True)
+    print("", flush=True)
+    print("  ALREADY COVERED -- no need to repeat:", flush=True)
+    print("    history paging, send, reply, react, delete, edit, pin/unpin", flush=True)
     print("", flush=True)
     print("  The browser stays open. Close it when done, or press Ctrl-C.", flush=True)
     print("  WARNING: capture-out/ will contain your live token + messages.", flush=True)
@@ -415,6 +435,49 @@ def main() -> int:
     seen: set[str] = set()
     started = time.time()
     last_report = 0.0
+
+    ws_path = OUT_DIR / "websocket.jsonl"
+    ws_fh = ws_path.open("a", encoding="utf-8")
+    ws_count = [0]
+
+    def harvest_websocket():
+        """Drain CDP performance logs for websocket frames.
+
+        Faye multiplexes handshake, subscribe, connect and every inbound message
+        over one socket, so these frames are the entire realtime protocol. The
+        log is consumed destructively by `get_log`, so this must keep up.
+        """
+        try:
+            entries = driver.get_log("performance")
+        except Exception:  # noqa: BLE001 - logging unavailable is not fatal
+            return
+        for entry in entries:
+            try:
+                msg = json.loads(entry["message"])["message"]
+            except Exception:  # noqa: BLE001
+                continue
+            method = msg.get("method", "")
+            if not method.startswith("Network.webSocket"):
+                continue
+            params = msg.get("params", {})
+            payload = (params.get("response") or {}).get("payloadData")
+            record = {
+                "ts": entry.get("timestamp"),
+                "method": method,
+                "url": params.get("url"),
+                "requestId": params.get("requestId"),
+                "payload": payload,
+            }
+            # Frames arrive as a JSON string; parse so the shape is readable
+            # rather than an escaped blob.
+            if payload:
+                try:
+                    record["parsed"] = json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    pass
+            ws_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            ws_fh.flush()
+            ws_count[0] += 1
 
     def harvest():
         for req in driver.requests:
@@ -524,13 +587,14 @@ def main() -> int:
                 print("[*] Browser closed.", flush=True)
                 break
             harvest()
+            harvest_websocket()
             now = time.time()
             if now - last_report > 15:
                 last_report = now
                 write_summary()
                 print(
                     f"[*] {len(endpoints)} endpoints | {len(seen)} requests | "
-                    f"{int(now - started)}s",
+                    f"{ws_count[0]} ws frames | {int(now - started)}s",
                     flush=True,
                 )
             time.sleep(2)
@@ -539,6 +603,9 @@ def main() -> int:
     finally:
         try:
             harvest()
+            harvest_websocket()
+            ws_fh.close()
+            print(f"[+] {ws_count[0]} websocket frames -> {ws_path}", flush=True)
         except Exception:  # noqa: BLE001
             pass
         try:

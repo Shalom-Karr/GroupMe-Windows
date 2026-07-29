@@ -15,11 +15,18 @@
 //!   Online direction.
 //! - State transitions are broadcast only when the value actually changes, so
 //!   subscribers never receive duplicate events.
+//!
+//! Testing override
+//! ----------------
+//! [`set_forced_offline`] pins the reported state to `Offline` whatever the
+//! probe says, so offline mode can be exercised without dropping the network.
+//! It is process-global, never persisted, and does not stop the probe loop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use tokio::sync::watch;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +41,33 @@ pub enum Connectivity {
     /// The UI does not swap on this — it may show a subtle indicator.
     Degraded,
     Offline,
+}
+
+// ---------------------------------------------------------------------------
+// Forced-offline override
+// ---------------------------------------------------------------------------
+
+/// Process-global rather than a monitor field because the tray flips it and the
+/// tray holds no reference to the monitor — and because "the machine is
+/// pretending to be offline" is a property of the process, not of one instance.
+static FORCED_OFFLINE: AtomicBool = AtomicBool::new(false);
+
+/// Forces the monitor to report `Offline` regardless of probe results.
+/// Exists so offline mode can be exercised without dropping the network.
+///
+/// This only decides what the *next* evaluation returns. To apply it now rather
+/// than at the next tick, call [`ConnectivityMonitor::refresh_override`].
+pub fn set_forced_offline(on: bool) {
+    if FORCED_OFFLINE.swap(on, Ordering::SeqCst) != on {
+        info!(
+            "connectivity: simulated offline {}",
+            if on { "engaged" } else { "cleared" }
+        );
+    }
+}
+
+pub fn forced_offline() -> bool {
+    FORCED_OFFLINE.load(Ordering::SeqCst)
 }
 
 // Design choice — option (a): native async fn in traits (AFIT, stabilised in
@@ -100,7 +134,25 @@ impl ConnectivityProbe for HttpProbe {
                 true
             }
             Err(e) => {
-                warn!("connectivity probe: unreachable — {e}");
+                // The whole source chain, not just `{e}`. reqwest's outermost
+                // error is always "error sending request for url (...)", which
+                // says nothing — a DNS failure, a refused connection and a
+                // rejected certificate all render identically. The real cause
+                // is nested underneath.
+                let mut detail = e.to_string();
+                let mut src: Option<&(dyn std::error::Error + 'static)> =
+                    std::error::Error::source(&e);
+                while let Some(s) = src {
+                    detail.push_str(&format!("\n  caused by: {s}"));
+                    src = s.source();
+                }
+                warn!(
+                    "connectivity probe: unreachable — {detail}\n  \
+                     (timeout={}, connect={}, request={})",
+                    e.is_timeout(),
+                    e.is_connect(),
+                    e.is_request()
+                );
                 false
             }
         }
@@ -199,6 +251,19 @@ impl<P: ConnectivityProbe> ConnectivityMonitor<P> {
         self.apply_result(&mut inner, success)
     }
 
+    /// Re-evaluate right after [`set_forced_offline`] was flipped.
+    ///
+    /// While the override is on a probe cannot change the answer, so it is
+    /// skipped and `Offline` applies at once instead of up to `PROBE_TIMEOUT`
+    /// later. With the override off this is a plain [`Self::poll_now`], which is
+    /// what restores the real state without waiting for the next tick.
+    pub async fn refresh_override(&self) -> Connectivity {
+        if forced_offline() {
+            return self.force_offline_now();
+        }
+        self.poll_now().await
+    }
+
     /// Runs the probe loop forever. Spawn this as a Tokio task.
     pub async fn run(self: Arc<Self>) {
         loop {
@@ -211,9 +276,36 @@ impl<P: ConnectivityProbe> ConnectivityMonitor<P> {
         }
     }
 
+    // Takes the lock itself. Kept separate from `refresh_override` so no
+    // `MutexGuard` ever lives inside an async fn's state machine — the future
+    // has to stay `Send` for the caller to spawn it.
+    fn force_offline_now(&self) -> Connectivity {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        self.force_offline(&mut inner)
+    }
+
+    /// Report `Offline` and drop the counters on the floor.
+    ///
+    /// Zeroing is what stops the override from being a one-way door: failures
+    /// racked up while simulating would otherwise still be on the clock when it
+    /// is switched off, and the machine would sit Offline working them off
+    /// instead of recovering on the first good probe.
+    fn force_offline(&self, inner: &mut MonitorInner) -> Connectivity {
+        inner.consecutive_failures = 0;
+        inner.consecutive_successes = 0;
+        self.publish(Connectivity::Offline)
+    }
+
     // Advance the state machine with one probe result.
     // Must be called with `inner` already locked by the caller.
     fn apply_result(&self, inner: &mut MonitorInner, success: bool) -> Connectivity {
+        // The override wins outright — the probe still ran (the loop must keep
+        // turning so clearing the override recovers without a restart), but its
+        // answer is discarded.
+        if forced_offline() {
+            return self.force_offline(inner);
+        }
+
         let new_state = if success {
             inner.consecutive_failures = 0;
             inner.consecutive_successes += 1;
@@ -239,6 +331,11 @@ impl<P: ConnectivityProbe> ConnectivityMonitor<P> {
             }
         };
 
+        self.publish(new_state)
+    }
+
+    // Store the new state and notify subscribers if it actually changed.
+    fn publish(&self, new_state: Connectivity) -> Connectivity {
         // `send_if_modified`, not `send`.
         //
         // `watch::Sender::send` fails when every receiver has been dropped, and
@@ -331,6 +428,30 @@ mod tests {
         Arc::new(ConnectivityMonitor::new(probe))
     }
 
+    /// The override is process-global and `cargo test` runs these in parallel
+    /// threads, so without this a simulation test leaks `Offline` into whatever
+    /// else happens to be probing at that moment. A tokio mutex rather than a
+    /// std one because it is held across awaits.
+    static OVERRIDE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Releasing exclusivity also clears the override, so a test that panicked
+    /// mid-simulation cannot leave the rest of the suite pretending to be offline.
+    struct Exclusive {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Exclusive {
+        fn drop(&mut self) {
+            set_forced_offline(false);
+        }
+    }
+
+    async fn exclusive() -> Exclusive {
+        Exclusive {
+            _guard: OVERRIDE_GUARD.lock().await,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // State-machine tests (no time dependency)
     // -----------------------------------------------------------------------
@@ -343,6 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_failure_is_degraded_not_offline() {
+        let _exclusive = exclusive().await;
         // THE key anti-flapping test: one transient failure must not declare Offline.
         let m = monitor_from_script([false]);
         m.poll_now().await;
@@ -351,6 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn three_consecutive_failures_declare_offline() {
+        let _exclusive = exclusive().await;
         let m = monitor_from_script([false, false, false]);
         m.poll_now().await;
         assert_eq!(m.state(), Connectivity::Degraded);
@@ -362,6 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_after_failures_resets_counter() {
+        let _exclusive = exclusive().await;
         // ff → success → f should land on Degraded, proving the counter was
         // reset. If the counter were not reset the last failure would be the
         // third consecutive and we would be Offline.
@@ -376,6 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_from_offline_on_first_success() {
+        let _exclusive = exclusive().await;
         let m = monitor_from_script([false, false, false, true]);
         m.poll_now().await; // Degraded
         m.poll_now().await; // Degraded
@@ -387,6 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_receives_transitions_and_no_duplicates() {
+        let _exclusive = exclusive().await;
         let m = monitor_from_script([false, false, false, true]);
         let mut rx = m.subscribe();
         assert_eq!(*rx.borrow(), Connectivity::Online);
@@ -413,6 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_now_updates_state_immediately() {
+        let _exclusive = exclusive().await;
         let m = monitor_from_script([false]);
         assert_eq!(m.state(), Connectivity::Online);
         let returned = m.poll_now().await;
@@ -421,8 +548,125 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Timing test — tokio::time::pause + advance; zero real-time elapsed.
+    // Forced-offline override
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_override_reports_offline_even_when_the_probe_succeeds() {
+        let _exclusive = exclusive().await;
+        let m = monitor_from_script([true, true]);
+        m.poll_now().await;
+        assert_eq!(m.state(), Connectivity::Online);
+
+        set_forced_offline(true);
+        assert!(forced_offline());
+        assert_eq!(m.poll_now().await, Connectivity::Offline);
+        assert_eq!(m.state(), Connectivity::Offline);
+    }
+
+    #[tokio::test]
+    async fn clearing_the_override_returns_online_on_the_next_success() {
+        let _exclusive = exclusive().await;
+        let m = monitor_from_script([true, true]);
+        set_forced_offline(true);
+        m.poll_now().await;
+        assert_eq!(m.state(), Connectivity::Offline);
+
+        set_forced_offline(false);
+        assert_eq!(m.poll_now().await, Connectivity::Online);
+    }
+
+    #[tokio::test]
+    async fn failures_racked_up_while_simulating_do_not_delay_recovery() {
+        // Two real failures land while the override is on. If they had been
+        // counted, the first failure after clearing it would be the third
+        // consecutive one and we would drop straight to Offline instead of
+        // Degraded — a simulation that quietly made the next real blip worse.
+        let _exclusive = exclusive().await;
+        let m = monitor_from_script([false, false, false]);
+        set_forced_offline(true);
+        m.poll_now().await;
+        m.poll_now().await;
+        assert_eq!(m.state(), Connectivity::Offline);
+
+        set_forced_offline(false);
+        assert_eq!(m.poll_now().await, Connectivity::Degraded);
+    }
+
+    #[tokio::test]
+    async fn the_simulated_transition_is_broadcast_exactly_once() {
+        let _exclusive = exclusive().await;
+        let m = monitor_from_script([true, true, true]);
+        let mut rx = m.subscribe();
+        assert_eq!(*rx.borrow(), Connectivity::Online);
+
+        set_forced_offline(true);
+        m.poll_now().await;
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Connectivity::Offline);
+
+        // Still forced: the state has not changed, so nothing may be sent.
+        m.poll_now().await;
+        assert!(
+            !rx.has_changed().unwrap(),
+            "a repeated forced Offline must not be broadcast again"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_override_applies_at_once_without_probing() {
+        let _exclusive = exclusive().await;
+        let (probe, count) = FakeProbe::with_script([]);
+        let m = Arc::new(ConnectivityMonitor::new(probe));
+
+        set_forced_offline(true);
+        // Spawned by `lib.rs`, so the future has to be Send — asserted here
+        // rather than discovered as a compile error in a file this module
+        // cannot see.
+        fn assert_send<T: Send>(_: &T) {}
+        let fut = m.refresh_override();
+        assert_send(&fut);
+        assert_eq!(fut.await, Connectivity::Offline);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a probe cannot change a forced Offline, so it must not be waited on"
+        );
+
+        set_forced_offline(false);
+        assert_eq!(m.refresh_override().await, Connectivity::Online);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "clearing it must re-probe");
+    }
+
+    // -----------------------------------------------------------------------
+    // Timing tests — tokio::time::pause + advance; zero real-time elapsed.
+    // -----------------------------------------------------------------------
+
+    /// The override must not stall the probe loop: clearing it has to recover on
+    /// the next scheduled tick, with no restart and no manual poll.
+    #[tokio::test(start_paused = true)]
+    async fn the_probe_loop_keeps_running_while_simulating() {
+        let _exclusive = exclusive().await;
+        let (probe, count) = FakeProbe::with_script([]); // every probe succeeds
+        let m = Arc::new(ConnectivityMonitor::new(probe));
+        let m2 = m.clone();
+        tokio::spawn(async move { m2.run().await });
+        settle().await;
+
+        set_forced_offline(true);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        settle().await;
+        assert_eq!(m.state(), Connectivity::Offline);
+        let probes = count.load(Ordering::SeqCst);
+        assert!(probes >= 1, "the loop must keep probing while simulating");
+
+        set_forced_offline(false);
+        // Offline shortens the interval to 5 s, so one window is enough.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+        assert_eq!(m.state(), Connectivity::Online);
+        assert!(count.load(Ordering::SeqCst) > probes);
+    }
 
     /// Prove the probe interval shortens when Offline.
     ///
@@ -471,5 +715,93 @@ mod tests {
             extra >= 5,
             "expected ≥5 probes in 30 s at 5 s offline interval, got {extra}"
         );
+    }
+}
+
+#[cfg(test)]
+mod live_diagnostics {
+    //! Not part of the suite. Run explicitly:
+    //!   cargo test --lib live_diagnostics -- --ignored --nocapture
+    //!
+    //! Exists because the app cannot reach api.groupme.com while every other
+    //! client on the same machine can. That asymmetry points at the TLS stack,
+    //! and reqwest's top-level error hides the cause.
+    use super::*;
+
+    fn chain(e: &reqwest::Error) -> String {
+        let mut s = format!("{e}");
+        let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+        while let Some(x) = src {
+            s.push_str(&format!("\n    caused by: {x}"));
+            src = x.source();
+        }
+        s
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn what_exactly_is_failing() {
+        let url = "https://api.groupme.com/v3/users/me";
+
+        println!("\n=== default builder (what the app uses) ===");
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => match c.get(url).send().await {
+                Ok(r) => println!("  OK  status {}", r.status()),
+                Err(e) => println!("  ERR {}", chain(&e)),
+            },
+            Err(e) => println!("  builder failed: {e}"),
+        }
+
+        println!("\n=== plain HTTP (isolates TLS from DNS/connect) ===");
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => match c.get("http://example.com").send().await {
+                Ok(r) => println!(
+                    "  OK  status {}  <- network fine, so failure above is TLS",
+                    r.status()
+                ),
+                Err(e) => println!("  ERR {}", chain(&e)),
+            },
+            Err(e) => println!("  builder failed: {e}"),
+        }
+
+        println!("\n=== TLS to a different host (is it GroupMe-specific?) ===");
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => match c.get("https://api.github.com").send().await {
+                Ok(r) => println!("  OK  status {}", r.status()),
+                Err(e) => println!("  ERR {}", chain(&e)),
+            },
+            Err(e) => println!("  builder failed: {e}"),
+        }
+
+        println!("\n=== ignoring cert validation (proves trust-store theory) ===");
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            Ok(c) => match c.get(url).send().await {
+                Ok(r) => println!(
+                    "  OK  status {}  <- SUCCEEDS without validation => the chain is\n      \
+                     being rejected. rustls uses bundled webpki roots and ignores the\n      \
+                     Windows certificate store.",
+                    r.status()
+                ),
+                Err(e) => println!(
+                    "  ERR {}  <- still fails, so NOT a trust-store issue",
+                    chain(&e)
+                ),
+            },
+            Err(e) => println!("  builder failed: {e}"),
+        }
+        println!();
     }
 }

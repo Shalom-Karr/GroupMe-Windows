@@ -60,11 +60,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            // Relaunching is one of the three routes back to the window, so it
+            // goes through the same restore path as the tray — including the
+            // unminimize-before-show ordering that `show()` alone gets wrong.
+            tray::show_and_focus(app);
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -408,10 +407,23 @@ async fn run_sync_loop(
         // it data it has no business receiving.
         let _ = app.emit_to("main", "archive://synced", &report);
 
-        // Sleep, but wake early if the token rotates so the caller can rebuild
-        // the client instead of spending up to a minute using a dead one.
+        // Two seconds while catching up, a minute once the archive is current.
+        //
+        // The 2s is not throughput — request pacing is governed inside the
+        // engine — it just stops the loop becoming tight if a cycle ever
+        // returns instantly, and gives `archive://synced` a beat to land.
+        // Sleeping the full minute between catch-up cycles is what made a
+        // 142k-message group take hours.
+        let delay = if report.more_work {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+
+        // Wake early if the token rotates, rather than spending the delay
+        // holding a client that is already dead.
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+            _ = tokio::time::sleep(delay) => {}
             changed = token_rx.changed() => {
                 if changed.is_err() {
                     return;
@@ -446,6 +458,20 @@ fn spawn_connectivity_watch(app: tauri::AppHandle, window: tauri::WebviewWindow)
             let monitor = monitor.clone();
             tauri::async_runtime::spawn(async move {
                 monitor.poll_now().await;
+            });
+        });
+    }
+
+    // The tray's "Simulate offline" toggle. The tray has already flipped the
+    // global before emitting, so the payload is redundant — this only forces an
+    // immediate re-evaluation instead of waiting up to a tick. `refresh_override`
+    // skips the network probe entirely while forced, so the swap is instant.
+    {
+        let monitor = monitor.clone();
+        app.listen(tray::EVENT_CONNECTIVITY_OVERRIDE, move |_| {
+            let monitor = monitor.clone();
+            tauri::async_runtime::spawn(async move {
+                monitor.refresh_override().await;
             });
         });
     }
