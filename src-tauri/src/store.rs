@@ -21,6 +21,13 @@ use std::path::Path;
 
 use crate::model::{id_sort_key, Chat, Conversation, ConversationKind, Group, Message};
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Bump only alongside a matching arm in `migrate`.
 pub const SCHEMA_VERSION: i32 = 1;
 
@@ -364,24 +371,39 @@ impl Store {
         let Some(target) = ev.target_message_id() else {
             return Ok(false);
         };
+        // `raw_json` is patched alongside the columns because every reader —
+        // pages, search hits, the client UI — rebuilds messages from it. A
+        // column-only update leaves the stored JSON serving the pre-event
+        // content, which for a deletion means continuing to show text the
+        // sender removed.
         let affected = match ev.kind.as_deref() {
             Some("message.update") => {
                 let Some(text) = ev.updated_text() else {
                     return Ok(false);
                 };
+                let updated_at = ev
+                    .data
+                    .get("updated_at")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_else(now_unix);
                 self.conn.execute(
-                    "UPDATE messages SET text = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![
-                        target,
-                        text,
-                        ev.data.get("updated_at").and_then(|v| v.as_i64())
-                    ],
+                    "UPDATE messages SET text = ?2, updated_at = ?3,
+                        raw_json = json_set(raw_json, '$.text', ?2, '$.updated_at', ?3)
+                     WHERE id = ?1",
+                    params![target, text, updated_at],
                 )?
             }
-            Some("message.deleted") => self.conn.execute(
-                "UPDATE messages SET deleted_at = ?2 WHERE id = ?1",
-                params![target, ev.deleted_at()],
-            )?,
+            Some("message.deleted") => {
+                // A concrete timestamp even when the frame omits one: a JSON
+                // null here would read back as "not deleted".
+                let deleted_at = ev.deleted_at().unwrap_or_else(now_unix);
+                self.conn.execute(
+                    "UPDATE messages SET deleted_at = ?2,
+                        raw_json = json_set(raw_json, '$.deleted_at', ?2)
+                     WHERE id = ?1",
+                    params![target, deleted_at],
+                )?
+            }
             _ => 0,
         };
         Ok(affected > 0)

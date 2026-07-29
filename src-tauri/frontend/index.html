@@ -93,6 +93,7 @@
 <script>
   const LIVE = "https://web.groupme.com";
   const OFFLINE = "offline.html";
+  const CLIENT = "client.html";
   // A cache-busted opaque probe. no-cors resolves on any HTTP response and
   // rejects only on a genuine network failure, which is exactly the signal we
   // want — a 4xx from GroupMe still means the internet works.
@@ -136,7 +137,19 @@
       fail();
       return;
     }
-    location.replace(LIVE);
+    location.replace((await preferredUi()) === "client" ? CLIENT : LIVE);
+  }
+
+  // Last-used surface: the web client or the custom one. Anything unexpected —
+  // no IPC, a rejected invoke, an unknown value — falls back to the web client,
+  // the only surface that can bootstrap a session on a fresh install.
+  async function preferredUi() {
+    try {
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        return await window.__TAURI__.core.invoke("client_ui_preference");
+      }
+    } catch (e) {}
+    return "web";
   }
 
   $("retry").addEventListener("click", route);

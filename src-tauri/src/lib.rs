@@ -17,9 +17,11 @@
 //!    registered on that surface at all (see `commands.rs`).
 
 pub mod api;
+pub mod client_commands;
 pub mod commands;
 pub mod connectivity;
 pub mod model;
+pub mod realtime;
 pub mod store;
 pub mod sync;
 pub mod token;
@@ -32,14 +34,20 @@ use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use commands::SharedStore;
 
+/// The live realtime worker, replaced wholesale when the token rotates.
+/// Dropping the previous handle closes its command channel, which is the
+/// worker's shutdown signal — so a rotation cannot leak a second socket.
+type RealtimeSlot = Arc<tokio::sync::Mutex<Option<realtime::RealtimeHandle>>>;
+
 pub const GROUPME_WEB_ORIGIN: &str = "https://web.groupme.com";
 pub const ARCHIVE_FILENAME: &str = "archive.db";
 pub const MEDIA_DIRNAME: &str = "media";
 
 /// Local pages. `index.html` probes connectivity and routes; `offline.html` is
-/// the archive reader.
+/// the archive reader; `client.html` is the custom client.
 const ROUTER_PAGE: &str = "index.html";
 const OFFLINE_PAGE: &str = "offline.html";
+const CLIENT_PAGE: &str = "client.html";
 
 /// Injected into every frame before page scripts run, on every navigation.
 /// Lifts the access token off an outgoing API request header — see inject.js
@@ -75,6 +83,15 @@ pub fn run() {
             commands::archive_search,
             commands::archive_media_path,
             commands::archive_stats,
+            client_commands::client_send_message,
+            client_commands::client_edit_message,
+            client_commands::client_delete_message,
+            client_commands::client_react,
+            client_commands::client_unreact,
+            client_commands::client_mark_read,
+            client_commands::client_upload_image,
+            client_commands::client_ui_preference,
+            client_commands::client_set_ui_preference,
             tray::show_app_menu,
             updater::updater_check,
             updater::updater_download,
@@ -95,6 +112,8 @@ pub fn run() {
             let store = store::Store::open(&data_dir.join(ARCHIVE_FILENAME))?;
             let shared: SharedStore = Arc::new(Mutex::new(store));
             app.manage(shared.clone());
+            app.manage(client_commands::SharedClient::default());
+            app.manage(RealtimeSlot::default());
 
             // Built here rather than declared in tauri.conf.json because an
             // initialization script can only be attached at window-build time.
@@ -125,8 +144,28 @@ pub fn run() {
                 });
             }
 
-            spawn_token_listener(app.handle().clone(), shared.clone(), media_dir);
-            spawn_connectivity_watch(app.handle().clone(), window);
+            spawn_token_listener(app.handle().clone(), shared.clone(), media_dir.clone());
+            spawn_ui_switch_listener(app.handle().clone(), window.clone());
+            spawn_connectivity_watch(app.handle().clone(), window, shared.clone());
+
+            // A token persisted by a previous session starts the sync loop —
+            // and therefore the client surface and realtime — without needing
+            // a visit to web.groupme.com first. It still goes through the same
+            // `/users/me` verification as a captured one, so a revoked token
+            // parks the loop until a fresh capture instead of failing loudly.
+            // Without this, someone whose preferred surface is the custom
+            // client could never sign back in short of flipping to the web UI.
+            {
+                let app = app.handle().clone();
+                let store = shared.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Ok(saved) = token::TokenStore::new().load() {
+                        if token::looks_like_token(&saved) {
+                            publish_token(app, store, media_dir, saved);
+                        }
+                    }
+                });
+            }
 
             Ok(())
         })
@@ -348,6 +387,24 @@ fn start_sync(
                 log::error!("persisting verified token: {e}");
             }
 
+            // The same gate covers the write surface and the realtime socket:
+            // neither exists until /users/me has proven whose account this is,
+            // so a forged token can neither send as the user nor subscribe to
+            // their channel. Replacing the realtime handle drops the previous
+            // one, which closes its command channel — the old worker's
+            // shutdown signal — so a rotation swaps the socket, never adds one.
+            {
+                let shared_client = app.state::<client_commands::SharedClient>();
+                *shared_client.write().await = Some(client.clone());
+                let slot = app.state::<RealtimeSlot>();
+                *slot.lock().await = Some(realtime::spawn(
+                    app.clone(),
+                    store.clone(),
+                    token.clone(),
+                    me.id.clone(),
+                ));
+            }
+
             run_sync_loop(&app, &store, &media_dir, client, &mut token_rx).await;
             // Only returns when the token changed; loop round and rebuild.
         }
@@ -434,9 +491,56 @@ async fn run_sync_loop(
     }
 }
 
+/// The injected toggle on web.groupme.com emits this; the custom client's own
+/// toggle invokes `client_set_ui_preference` and navigates itself. Only the
+/// remote side needs the event path — remote origins cannot invoke commands.
+///
+/// The event is forgeable by anything running on the GroupMe page, so the
+/// payload is not trusted: it is re-validated here and the only thing a forgery
+/// can achieve is switching between two surfaces the user already has.
+fn spawn_ui_switch_listener(app: tauri::AppHandle, window: tauri::WebviewWindow) {
+    let handle = app.clone();
+    app.listen("groupme://switch-ui", move |event| {
+        let ui: String = serde_json::from_str::<serde_json::Value>(event.payload())
+            .ok()
+            .and_then(|v| v.get("ui").and_then(|u| u.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        if ui != client_commands::UI_CLIENT && ui != client_commands::UI_WEB {
+            return;
+        }
+
+        let store = handle.state::<SharedStore>().inner().clone();
+        {
+            let store = store.clone();
+            let ui = ui.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let s = store.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = s.set_meta("preferred_ui", &ui) {
+                    log::error!("saving ui preference: {e:#}");
+                }
+            });
+        }
+
+        let target = if ui == client_commands::UI_CLIENT {
+            client_url()
+        } else {
+            match GROUPME_WEB_ORIGIN.parse() {
+                Ok(u) => u,
+                Err(_) => return,
+            }
+        };
+        log::info!("switching surface to {ui}");
+        let _ = window.navigate(target);
+    });
+}
+
 /// Swaps the window between the live client and the local reader as the network
 /// comes and goes.
-fn spawn_connectivity_watch(app: tauri::AppHandle, window: tauri::WebviewWindow) {
+fn spawn_connectivity_watch(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    store: SharedStore,
+) {
     let monitor = Arc::new(connectivity::ConnectivityMonitor::new(
         connectivity::HttpProbe::new(),
     ));
@@ -496,16 +600,26 @@ fn spawn_connectivity_watch(app: tauri::AppHandle, window: tauri::WebviewWindow)
             );
             match state {
                 connectivity::Connectivity::Offline => {
-                    log::info!("offline — switching to the local archive");
-                    let _ = window.navigate(offline_url());
+                    // The custom client reads from the archive over IPC, so it
+                    // works offline as-is — writes fail with inline errors.
+                    // Yanking it to the reader would only lose scroll position.
+                    if on_client_page(&window) {
+                        log::info!("offline — staying on the custom client (reads are local)");
+                    } else {
+                        log::info!("offline — switching to the local archive");
+                        let _ = window.navigate(offline_url());
+                    }
                 }
                 connectivity::Connectivity::Online => {
                     // Only pull the user back if they are actually sitting on
                     // the offline reader. Navigating a working session would
                     // throw away their scroll position for no reason.
                     if on_local_page(&window) {
-                        log::info!("back online — returning to the live client");
-                        if let Ok(url) = GROUPME_WEB_ORIGIN.parse() {
+                        let ui = preferred_ui(&store).await;
+                        log::info!("back online — returning to the {ui} surface");
+                        if ui == client_commands::UI_CLIENT {
+                            let _ = window.navigate(client_url());
+                        } else if let Ok(url) = GROUPME_WEB_ORIGIN.parse() {
                             let _ = window.navigate(url);
                         }
                     }
@@ -524,6 +638,12 @@ fn offline_url() -> tauri::Url {
         .unwrap_or_else(|_| "about:blank".parse().expect("static url"))
 }
 
+fn client_url() -> tauri::Url {
+    format!("tauri://localhost/{CLIENT_PAGE}")
+        .parse()
+        .unwrap_or_else(|_| "about:blank".parse().expect("static url"))
+}
+
 fn on_local_page(window: &tauri::WebviewWindow) -> bool {
     window
         .url()
@@ -532,6 +652,30 @@ fn on_local_page(window: &tauri::WebviewWindow) -> bool {
             s.contains(OFFLINE_PAGE) || s.contains(ROUTER_PAGE)
         })
         .unwrap_or(false)
+}
+
+fn on_client_page(window: &tauri::WebviewWindow) -> bool {
+    window
+        .url()
+        .map(|u| u.as_str().contains(CLIENT_PAGE))
+        .unwrap_or(false)
+}
+
+/// Reads the persisted surface choice; anything but an explicit "client" means
+/// the web client, because that is the only surface that can bootstrap a token.
+async fn preferred_ui(store: &SharedStore) -> &'static str {
+    let store = store.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        let s = store.lock().unwrap_or_else(|e| e.into_inner());
+        s.get_meta("preferred_ui").ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten();
+    match saved.as_deref() {
+        Some(v) if v == client_commands::UI_CLIENT => client_commands::UI_CLIENT,
+        _ => client_commands::UI_WEB,
+    }
 }
 
 fn now_unix() -> i64 {

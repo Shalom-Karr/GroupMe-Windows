@@ -198,4 +198,45 @@
     tauriEmit('groupme://offline', {});
   });
 
+  // ── Surface toggle ────────────────────────────────────────────────────────
+  // A small fixed button that switches to the app's own client UI. It goes
+  // over the EVENT channel because a remote origin cannot invoke commands;
+  // Rust re-validates the payload, records the preference, and navigates.
+  // Top frame of web.groupme.com only — never inside iframes or local pages.
+  (function addUiToggle() {
+    try {
+      if (window.top !== window) { return; }
+      if (location.host !== 'web.groupme.com') { return; }
+
+      function mount() {
+        if (document.getElementById('groupme-desktop-uiswap')) { return; }
+        if (!document.body) { return; }
+        var btn = document.createElement('button');
+        btn.id = 'groupme-desktop-uiswap';
+        btn.type = 'button';
+        btn.textContent = 'Custom UI';
+        btn.title = 'Switch to the desktop app’s own client (remembered as your preference)';
+        btn.style.cssText =
+          'position:fixed;right:14px;bottom:14px;z-index:2147483647;' +
+          'font:600 11px/1 system-ui,sans-serif;letter-spacing:.04em;text-transform:uppercase;' +
+          'padding:7px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.25);' +
+          'background:rgba(20,20,28,.82);color:#fff;cursor:pointer;opacity:.55;';
+        btn.addEventListener('mouseenter', function () { btn.style.opacity = '1'; });
+        btn.addEventListener('mouseleave', function () { btn.style.opacity = '.55'; });
+        btn.addEventListener('click', function () {
+          tauriEmit('groupme://switch-ui', { ui: 'client' });
+        });
+        document.body.appendChild(btn);
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mount);
+      } else {
+        mount();
+      }
+    } catch (e) {
+      // Cosmetic feature; never let it break the page or the token capture.
+    }
+  }());
+
 }());

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "client-ui",
+  "description": "The custom client UI (frontend/client.html), which is the one local surface that WRITES — send, edit, delete, react, read receipts, image upload, via the client_* commands in client_commands.rs. It runs in the main window because that is the window the GroupMe/custom toggle swaps and the window realtime.rs emits its realtime://* events to. Stated plainly so nobody reads more protection into this file than it provides: this project ships no app-level ACL manifest, so app-defined commands registered through generate_handler! are not permission-gated the way plugin commands are, and this capability therefore does not stop offline.html from calling a client_* command if it knew the name. What actually separates the surfaces is that offline.html never learns those names, and that the remote origin is gated for real — capabilities/remote.json has no archive or client commands, and a capability without a remote key resolves to local execution only, so web.groupme.com is hard-rejected. This file documents which local page is allowed to mutate, and is the thing to change if an ACL manifest is added later.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "opener:default",
+    "notification:default"
+  ]
+}

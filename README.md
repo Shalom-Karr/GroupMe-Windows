@@ -5,12 +5,13 @@
 
 A native Windows desktop app built with Tauri 2 and Rust. It wraps `https://web.groupme.com` in a WebView2 window while a background Rust worker archives groups, DMs, messages, and media into a local SQLite database. When the network is unavailable, the window switches to a bundled offline reader backed by that archive.
 
-Two things make it worth installing:
+Three things make it worth installing:
 
 - **Full-text search over your entire history.** GroupMe has no message search on any platform — its only search box filters the chat list by conversation *name*. This builds an FTS5 index over every message you have ever received.
 - **Read everything offline**, including cached images and avatars.
+- **A custom client UI** (since 0.2.0). After signing in once on the web client, a `Custom UI` button switches to the app's own interface: it reads from the local archive so it opens instantly, searches everything, updates live over GroupMe's realtime socket, and sends, edits, deletes, reacts and uploads through the API directly. A `Web UI` button switches back, and the app remembers which surface you used last.
 
-Offline is **read-only**: you can read your whole history, you cannot send. That is deliberate rather than unfinished — a queue that silently fires messages hours later is a worse product than a disabled composer.
+The *offline reader* is **read-only**: you can read your whole history, you cannot send. That is deliberate rather than unfinished — a queue that silently fires messages hours later is a worse product than a disabled composer. The custom client keeps working offline for reading; its composer fails fast with a visible error rather than queueing.
 
 Get the **`-setup.exe`**, not the `.msi` — only the NSIS build auto-updates, and it installs per-user so updates need no admin rights. See [Install the `-setup.exe`, not the `.msi`](#install-the--setupexe-not-the-msi) for why.
 
@@ -133,15 +134,26 @@ whatever is still in the WAL.
 GroupMe Windows\
 ├── src-tauri\
 │   ├── src\
-│   │   ├── lib.rs          # Tauri builder, app-level constants
-│   │   ├── main.rs         # Binary entry point (hides console in release)
-│   │   ├── model.rs        # Serde types for the GroupMe v3 API wire format
-│   │   ├── store.rs        # SQLite schema, migrations, all read/write paths
-│   │   └── token.rs        # Windows Credential Manager wrapper, fingerprinting
+│   │   ├── lib.rs             # Tauri builder, wiring, surface routing
+│   │   ├── main.rs            # Binary entry point (hides console in release)
+│   │   ├── api.rs             # GroupMe REST client: reads, writes, uploads
+│   │   ├── realtime.rs        # Faye/Bayeux websocket, live message delivery
+│   │   ├── commands.rs        # Read-only IPC surface (archive_*)
+│   │   ├── client_commands.rs # Write IPC surface (client_*)
+│   │   ├── sync.rs            # Background archive worker
+│   │   ├── connectivity.rs    # Online/offline state machine
+│   │   ├── model.rs           # Serde types for the GroupMe API wire format
+│   │   ├── store.rs           # SQLite schema, migrations, all read/write paths
+│   │   ├── tray.rs            # Tray icon, menu, sync-status panel
+│   │   ├── updater.rs         # Update check, staged install on exit
+│   │   └── token.rs           # Windows Credential Manager wrapper, fingerprinting
+│   ├── capabilities\          # Per-window permission scopes
 │   ├── frontend\
-│   │   ├── index.html      # Connectivity router (online → web.groupme.com)
-│   │   ├── inject.js       # Init script: intercepts x-access-token from fetch/XHR
-│   │   └── offline.html    # Bundled offline reader (in progress)
+│   │   ├── index.html      # Connectivity router; opens the last-used surface
+│   │   ├── inject.js       # Init script: token capture + "Custom UI" toggle
+│   │   ├── client.html     # The custom client (reads archive, writes via API)
+│   │   ├── offline.html    # Bundled offline reader (read-only)
+│   │   └── status.html     # Sync-status panel opened from the tray
 │   ├── icons\              # App icons for the installer and taskbar
 │   ├── Cargo.toml
 │   └── tauri.conf.json

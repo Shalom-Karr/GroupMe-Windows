@@ -1,6 +1,6 @@
 [package]
 name = "groupme-desktop"
-version = "0.1.1"
+version = "0.2.0"
 description = "GroupMe for Windows — native desktop shell (Tauri 2) with a local SQLite archive for offline reading"
 authors = ["Shalom Karr"]
 # AGPL-3.0-only WITH the Commons Clause condition. Commons Clause has no SPDX
@@ -81,6 +81,19 @@ anyhow = "1"
 thiserror = "2"
 log = "0.4"
 tauri-plugin-log = "2"
+
+# Faye realtime. native-tls here for the same reason as reqwest: schannel uses
+# the Windows trust store, so the socket works on machines behind TLS
+# inspection where a bundled root store does not.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+  "connect",
+  "native-tls",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# source_guid on outgoing messages. GroupMe echoes it back, which is how an
+# optimistic local row is matched to the server's copy instead of duplicating.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Every API-client test runs against a local mock rather than api.groupme.com,

@@ -1,0 +1,2739 @@
+<!--
+  The custom client.
+
+  This is the app's own GroupMe client, not a wrapper around web.groupme.com.
+  It reads every message out of the local SQLite archive over `archive_*` IPC
+  and writes through the app's own `client_*` commands, which means it is fast
+  where the web app is slow and — the actual reason it exists — it can search
+  the entire history, which the web app cannot.
+
+  Four constraints hold this file together.
+
+  NO NETWORK REFERENCES. Not a CDN, not a font, not a remote avatar, not an
+  attachment URL. Every byte is inline. The app ships a strict CSP whose
+  `img-src` admits only self, the asset protocol and `data:`, so a remote URL
+  here would not merely be impolite, it would be blocked. Cached media is
+  resolved to a local path with `archive_media_path` and loaded through
+  `convertFileSrc`; a freshly sent image shows from a `data:` preview until the
+  next sync downloads it.
+
+  NO innerHTML WITH DATA. Message text, display names, attachment URLs and
+  search queries are third-party content that arrives from other people's
+  keyboards. Every one of them reaches the DOM through `textContent` or
+  `document.createTextNode`. The only markup written as a string in this file is
+  the static icon set below, which contains no interpolation at all.
+
+  MESSAGE IDS ARE STRINGS, ALWAYS. GroupMe ids run to ~1.78e17, past
+  Number.MAX_SAFE_INTEGER where a double's ulp is 32. `Number(id)` silently
+  rounds, and a rounded cursor either repeats the boundary message forever or
+  drops it from the thread permanently. Ids are compared with `cmpId` (length,
+  then lexicographic) and the one place arithmetic is genuinely needed — the
+  "jump to this message" anchor — uses BigInt, which is exact.
+
+  THE LIST IS WINDOWED. Conversations here reach six figures. Messages are held
+  in fixed-size chunks; a chunk that scrolls far out of view is replaced by a
+  spacer of its own measured height and rebuilt when it comes back. A new
+  message appends one row to one chunk. Nothing in this file re-renders the
+  whole thread in response to a new message.
+
+  ── Realtime payload assumptions ─────────────────────────────────────────────
+  `realtime.rs` emits `realtime://message`, `realtime://reaction`,
+  `realtime://typing` and `realtime://state`. Every assumption about their shape
+  is isolated in the four `adapt*` functions at the top of the script and
+  nowhere else, so a shape change is a small edit there rather than a rewrite.
+  What they currently assume, in order of preference, is:
+
+    realtime://message   the payload is the Message itself, or carries it under
+                         `message`/`msg`/`data`. The conversation is taken from
+                         an explicit `conversation_id`/`conversationId` on the
+                         envelope, else from the message's own `group_id` or
+                         `conversation_id`. A payload with no usable id is
+                         dropped rather than guessed at.
+    realtime://reaction  `{ conversation_id, message_id, reactions[] }` on the
+                         envelope, or nested under `message`. If the frame
+                         carries a whole message instead, the reactions are read
+                         off it. `favorited_by` is accepted as an alternative to
+                         `reactions` and normalised to one reaction row.
+    realtime://typing    `{ conversation_id, user_id, name?, started?|until? }`.
+                         Absent an expiry the indicator self-clears after 6s.
+    realtime://state     a bare string, a bare bool, or an object with any of
+                         `connected`/`online`/`ok` plus an optional
+                         `state`/`status` label.
+
+  Every adapter tolerates the payload arriving wrapped as `{payload: …}` and
+  accepts snake_case or camelCase, because Tauri's serde bridge has been
+  configured both ways in this project's history.
+
+  ── Privacy ──────────────────────────────────────────────────────────────────
+  The demo data below is synthetic and exists only so the page renders when
+  opened outside the app (no IPC). No real name, user id, group id, message id
+  or token appears anywhere in this file.
+-->
+<meta charset="utf-8" />
+<title>GroupMe</title>
+<style>
+  :root {
+    --accent: #3c16d3;
+    --bg: #ffffff;
+    --fg: #16161d;
+    --muted: #6b6b7b;
+    --card: #f5f5f8;
+    --border: #e3e3ea;
+
+    --panel: #fbfbfd;
+    --hover: #eeeef4;
+    --sel: #e7e2fb;
+    --mine-bg: #3c16d3;
+    --mine-fg: #ffffff;
+    --tint: rgba(60, 22, 211, .08);
+    --shadow: 0 1px 2px rgba(16, 16, 29, .06);
+    --pop: 0 8px 28px rgba(16, 16, 29, .16);
+    --ok: #0d7a5f;
+    --warn: #a3341f;
+    --mark: #ffe08a;
+    --mark-fg: #16161d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e0e14;
+      --fg: #f2f2f6;
+      --muted: #9a9aab;
+      --card: #191922;
+      --border: #2a2a36;
+
+      --panel: #12121a;
+      --hover: #1f1f2a;
+      --sel: #241c46;
+      --mine-bg: #4a24e0;
+      --mine-fg: #ffffff;
+      --tint: rgba(122, 92, 244, .14);
+      --shadow: none;
+      --pop: 0 10px 30px rgba(0, 0, 0, .55);
+      --ok: #35c79a;
+      --warn: #ff8a6a;
+      --mark: #7a5a10;
+      --mark-fg: #ffeec2;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    overflow: hidden;
+  }
+  ::selection { background: var(--sel); }
+  button { font: inherit; color: inherit; }
+  #icons { display: none; }
+
+  .app { display: grid; grid-template-columns: 310px 1fr; height: 100%; }
+
+  /* ---------- sidebar ---------- */
+
+  .sidebar {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+  }
+  .side-head { padding: .85rem .85rem .6rem; border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: .55rem; margin-bottom: .75rem; }
+  .mark {
+    width: 28px; height: 28px; flex: none;
+    border-radius: 9px; background: var(--accent);
+    display: grid; place-items: center;
+  }
+  .mark svg { width: 16px; height: 16px; stroke: #fff; }
+  .brand-name { font-size: .9rem; font-weight: 600; letter-spacing: -.01em; }
+  .pill {
+    margin-left: auto; font-size: .68rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; padding: .18rem .45rem; border-radius: 6px;
+    color: var(--muted); background: var(--card); border: 1px solid var(--border);
+    display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap;
+  }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+  .pill.live { color: var(--ok); }
+  .pill.live .dot { background: var(--ok); }
+  .pill.down { color: var(--warn); }
+  .pill.down .dot { background: var(--warn); }
+
+  .uiswap {
+    font: inherit; font-size: .68rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; padding: .18rem .45rem; border-radius: 6px;
+    color: var(--muted); background: var(--card); border: 1px solid var(--border);
+    cursor: pointer; white-space: nowrap;
+  }
+  .uiswap:hover { color: var(--fg); border-color: var(--accent); }
+
+  .search { position: relative; }
+  .search > svg {
+    position: absolute; left: .55rem; top: 50%; transform: translateY(-50%);
+    width: 14px; height: 14px; color: var(--muted); pointer-events: none;
+  }
+  input[type="search"] {
+    width: 100%; font: inherit; font-size: .85rem;
+    padding: .42rem .6rem .42rem 1.85rem;
+    border-radius: 9px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--fg);
+    -webkit-user-select: text; user-select: text;
+  }
+  input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
+  input[type="search"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--tint); }
+  input[type="search"]::placeholder { color: var(--muted); }
+  .search-hint {
+    position: absolute; right: .5rem; top: 50%; transform: translateY(-50%);
+    font-size: .68rem; color: var(--muted); pointer-events: none;
+    border: 1px solid var(--border); border-radius: 5px; padding: 0 .28rem; background: var(--card);
+  }
+  .search.busy .search-hint { display: none; }
+
+  .list { flex: 1; overflow-y: auto; padding: .4rem; min-height: 0; }
+  .list-label {
+    font-size: .7rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--muted); padding: .6rem .55rem .35rem;
+    display: flex; align-items: baseline; gap: .4rem;
+  }
+  .list-label .sub { font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+  .row {
+    display: flex; gap: .6rem; align-items: center; width: 100%;
+    padding: .5rem .55rem; border-radius: 10px;
+    border: 0; background: none; color: inherit; font: inherit; text-align: left;
+    cursor: pointer;
+  }
+  .row:hover { background: var(--hover); }
+  .row.active { background: var(--sel); }
+  .row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .row-body { min-width: 0; flex: 1; }
+  .row-top { display: flex; align-items: baseline; gap: .5rem; }
+  .row-name {
+    font-size: .875rem; font-weight: 600; letter-spacing: -.01em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
+  }
+  .row-time { font-size: .72rem; color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+  .row-prev {
+    font-size: .8rem; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: .05rem;
+  }
+  .row.unread .row-name { font-weight: 700; }
+  .row.unread .row-prev { color: var(--fg); }
+  .unread-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    flex: none; margin-left: .1rem;
+  }
+
+  .avatar {
+    width: 34px; height: 34px; flex: none; border-radius: 50%;
+    object-fit: cover; background: var(--card);
+    display: grid; place-items: center;
+    font-size: .78rem; font-weight: 600; color: #fff; letter-spacing: .01em;
+  }
+  .avatar.sm { width: 30px; height: 30px; font-size: .7rem; }
+  .avatar.square { border-radius: 10px; }
+
+  .side-foot {
+    border-top: 1px solid var(--border); padding: .55rem .85rem;
+    font-size: .74rem; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .side-empty { padding: 1.5rem .9rem; color: var(--muted); font-size: .82rem; text-align: center; line-height: 1.6; }
+
+  /* ---------- main ---------- */
+
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
+
+  .thread { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  .thread.show { display: flex; }
+
+  .thread-head {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .7rem 1rem; border-bottom: 1px solid var(--border);
+    background: var(--bg); flex: none;
+  }
+  .back {
+    display: none; flex: none; width: 30px; height: 30px; padding: 0;
+    align-items: center; justify-content: center;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--card);
+    color: var(--fg); cursor: pointer;
+  }
+  .back svg { width: 15px; height: 15px; }
+  .thread-title { font-size: .95rem; font-weight: 600; letter-spacing: -.01em; margin: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread-sub { font-size: .74rem; color: var(--muted); margin-top: .05rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread-headtext { min-width: 0; flex: 1; }
+  .head-actions { display: flex; gap: .35rem; flex: none; }
+  .hbtn {
+    width: 30px; height: 30px; padding: 0; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--card); color: var(--muted);
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .hbtn:hover { color: var(--fg); background: var(--hover); }
+  .hbtn svg { width: 15px; height: 15px; }
+
+  .banner {
+    display: none; align-items: center; gap: .6rem; flex: none;
+    padding: .5rem 1rem; font-size: .78rem;
+    background: var(--sel); border-bottom: 1px solid var(--border);
+  }
+  .banner.show { display: flex; }
+  .banner span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .banner button {
+    margin-left: auto; flex: none; border: 1px solid var(--border); background: var(--bg);
+    color: var(--fg); border-radius: 8px; padding: .2rem .55rem; font-size: .76rem; cursor: pointer;
+  }
+  .banner button:hover { background: var(--hover); }
+
+  .scroller { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; position: relative; }
+  .messages { max-width: 46rem; margin: 0 auto; padding: 1rem 1.25rem 1.25rem; }
+  .chunk { min-height: 1px; }
+
+  .top-state { display: grid; place-items: center; padding: .9rem 0 .3rem; min-height: 1rem; }
+  .spinner {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .top-note { font-size: .74rem; color: var(--muted); }
+
+  .day { display: flex; align-items: center; gap: .75rem; margin: 1.35rem 0 .9rem; }
+  .day::before, .day::after { content: ""; height: 1px; background: var(--border); flex: 1; }
+  .day span { font-size: .72rem; font-weight: 600; color: var(--muted); letter-spacing: .02em; }
+
+  .sys {
+    text-align: center; font-size: .76rem; color: var(--muted);
+    margin: .8rem auto; max-width: 30rem; line-height: 1.5;
+  }
+
+  .msg { display: flex; gap: .6rem; margin-top: .7rem; align-items: flex-start; position: relative; }
+  .msg.cont { margin-top: .12rem; }
+  .msg .gutter { width: 30px; flex: none; }
+  .msg-body { min-width: 0; max-width: 34rem; }
+  .msg-meta { display: flex; align-items: baseline; gap: .45rem; margin-bottom: .12rem; }
+  .msg-name { font-size: .8rem; font-weight: 600; letter-spacing: -.005em; }
+  .msg-time { font-size: .7rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .bubble {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: .42rem .68rem;
+    font-size: .9rem; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    -webkit-user-select: text; user-select: text;
+    box-shadow: var(--shadow);
+  }
+  .bubble.tomb { font-style: italic; color: var(--muted); background: transparent; border-style: dashed; }
+  .bubble.pending { opacity: .6; }
+  .edited { font-size: .7rem; color: var(--muted); margin-left: .3rem; font-style: normal; }
+
+  .msg.mine { flex-direction: row-reverse; }
+  .msg.mine .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
+  .msg.mine .msg-meta { flex-direction: row-reverse; }
+  .msg.mine .bubble { background: var(--mine-bg); border-color: var(--mine-bg); color: var(--mine-fg); }
+  .msg.mine .bubble.tomb { background: transparent; color: var(--muted); border-color: var(--border); }
+  .msg.mine .edited { color: rgba(255, 255, 255, .7); }
+  .msg.mine .quote { border-left-color: rgba(255, 255, 255, .4); }
+
+  .msg.hit > .msg-body > .bubble { box-shadow: 0 0 0 2px var(--accent); }
+  @keyframes flash { 0%, 100% { background: transparent; } 30% { background: var(--tint); } }
+  .msg.flash { animation: flash 1.6s ease-out 1; border-radius: 12px; }
+
+  .quote {
+    border-left: 3px solid var(--border); padding: .1rem 0 .1rem .55rem;
+    margin-bottom: .3rem; font-size: .78rem; color: var(--muted); line-height: 1.45;
+    max-width: 100%; overflow: hidden; cursor: pointer; text-align: left;
+    background: none; border-top: 0; border-right: 0; border-bottom: 0; display: block; width: 100%;
+  }
+  .quote:hover { color: var(--fg); }
+  .quote b { font-weight: 600; color: var(--fg); font-size: .76rem; display: block; }
+  .msg.mine .quote, .msg.mine .quote b { color: rgba(255, 255, 255, .82); }
+  .quote-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  .atts { display: flex; flex-direction: column; gap: .35rem; margin-top: .3rem; }
+  .msg-body > .atts:first-child { margin-top: 0; }
+  .att-img {
+    display: block; max-width: min(320px, 100%); max-height: 340px;
+    border-radius: 12px; border: 1px solid var(--border); background: var(--card);
+  }
+  .att-miss {
+    display: flex; align-items: center; gap: .55rem;
+    max-width: 320px; padding: .7rem .8rem;
+    border: 1px dashed var(--border); border-radius: 12px;
+    color: var(--muted); font-size: .78rem; line-height: 1.4; background: var(--card);
+  }
+  .att-miss svg { width: 18px; height: 18px; flex: none; }
+
+  .reacts { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .3rem; }
+  .react {
+    display: inline-flex; align-items: center; gap: .25rem;
+    font-size: .74rem; line-height: 1; padding: .2rem .4rem;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+    cursor: pointer;
+  }
+  .react:hover { background: var(--hover); }
+  .react.own { border-color: var(--accent); color: var(--fg); background: var(--tint); }
+  .react .glyph { font-size: .82rem; }
+  .msg.mine .reacts { justify-content: flex-end; }
+
+  /* Row actions: revealed on hover, never on a permanent toolbar that would
+     double the height of every row in a six-figure thread. */
+  .acts {
+    position: absolute; top: -.55rem; display: none; gap: .15rem;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 9px;
+    padding: .12rem; box-shadow: var(--shadow); z-index: 3;
+  }
+  .msg .acts { right: 2.4rem; }
+  .msg.mine .acts { right: auto; left: 2.4rem; }
+  .msg:hover .acts, .msg:focus-within .acts { display: flex; }
+  .act {
+    width: 26px; height: 26px; border: 0; background: none; color: var(--muted);
+    border-radius: 6px; display: grid; place-items: center; cursor: pointer; padding: 0;
+  }
+  .act:hover { background: var(--hover); color: var(--fg); }
+  .act svg { width: 14px; height: 14px; }
+  .act .emo { font-size: .95rem; line-height: 1; }
+
+  /* ---------- composer ---------- */
+
+  .composer { flex: none; border-top: 1px solid var(--border); padding: .6rem 1.25rem .8rem; background: var(--bg); }
+  .composer-inner { max-width: 46rem; margin: 0 auto; }
+
+  .ctx {
+    display: none; align-items: flex-start; gap: .5rem;
+    padding: .4rem .6rem; margin-bottom: .45rem;
+    border-left: 3px solid var(--accent); background: var(--card);
+    border-radius: 0 8px 8px 0; font-size: .78rem; color: var(--muted);
+  }
+  .ctx.show { display: flex; }
+  .ctx-body { min-width: 0; flex: 1; }
+  .ctx-title { font-weight: 600; color: var(--fg); font-size: .75rem; }
+  .ctx-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ctx-x {
+    flex: none; width: 22px; height: 22px; border: 0; background: none; color: var(--muted);
+    border-radius: 6px; display: grid; place-items: center; cursor: pointer; padding: 0;
+  }
+  .ctx-x:hover { background: var(--hover); color: var(--fg); }
+  .ctx-x svg { width: 13px; height: 13px; }
+
+  .drafts { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .45rem; }
+  .draft-att { position: relative; }
+  .draft-att img {
+    display: block; width: 64px; height: 64px; object-fit: cover;
+    border-radius: 10px; border: 1px solid var(--border); background: var(--card);
+  }
+  .draft-att .ctx-x {
+    position: absolute; top: -6px; right: -6px; width: 20px; height: 20px;
+    background: var(--bg); border: 1px solid var(--border);
+  }
+  .draft-att .up { font-size: .68rem; color: var(--muted); text-align: center; margin-top: .1rem; }
+
+  .composer-box {
+    display: flex; align-items: flex-end; gap: .45rem;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--card); padding: .35rem .4rem .35rem .7rem;
+  }
+  .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--tint); }
+  .composer-box textarea {
+    flex: 1; min-width: 0; font: inherit; font-size: .875rem; line-height: 1.45;
+    border: 0; background: none; color: var(--fg); resize: none;
+    max-height: 8.5rem; padding: .35rem 0; overflow-y: auto;
+    -webkit-user-select: text; user-select: text;
+  }
+  .composer-box textarea::placeholder { color: var(--muted); }
+  .composer-box textarea:focus { outline: none; }
+  .cbtn {
+    flex: none; width: 30px; height: 30px; border-radius: 8px; margin-bottom: .1rem;
+    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+    display: grid; place-items: center; cursor: pointer; padding: 0;
+  }
+  .cbtn:hover:not(:disabled) { color: var(--fg); background: var(--hover); }
+  .cbtn:disabled { opacity: .45; cursor: not-allowed; }
+  .cbtn svg { width: 15px; height: 15px; }
+  .cbtn.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .cbtn.go:hover:not(:disabled) { background: var(--accent); color: #fff; filter: brightness(1.08); }
+
+  .composer-foot {
+    display: flex; align-items: center; gap: .5rem;
+    margin-top: .4rem; font-size: .75rem; color: var(--muted); min-height: 1.1rem;
+  }
+  .composer-foot .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .composer-foot .count { font-variant-numeric: tabular-nums; flex: none; }
+  .composer-foot .count.over { color: var(--warn); font-weight: 600; }
+  .cerr { color: var(--warn); }
+  .typing { font-style: italic; }
+
+  /* ---------- popovers ---------- */
+
+  .pop {
+    position: fixed; z-index: 40; display: none;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--pop); padding: .3rem;
+  }
+  .pop.show { display: block; }
+  .pop-emoji { display: grid; grid-template-columns: repeat(6, 2rem); gap: .1rem; }
+  .pop-emoji button {
+    width: 2rem; height: 2rem; border: 0; background: none; border-radius: 8px;
+    font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0;
+  }
+  .pop-emoji button:hover { background: var(--hover); }
+
+  .menu { min-width: 11rem; }
+  .menu button {
+    display: flex; align-items: center; gap: .5rem; width: 100%;
+    border: 0; background: none; text-align: left; cursor: pointer;
+    padding: .38rem .5rem; border-radius: 8px; font-size: .82rem;
+  }
+  .menu button:hover { background: var(--hover); }
+  .menu button.danger { color: var(--warn); }
+  .menu button svg { width: 14px; height: 14px; flex: none; color: var(--muted); }
+  .menu button.danger svg { color: var(--warn); }
+  .menu hr { border: 0; border-top: 1px solid var(--border); margin: .25rem .3rem; }
+
+  .scrim { position: fixed; inset: 0; z-index: 39; display: none; }
+  .scrim.show { display: block; }
+
+  /* ---------- search results ---------- */
+
+  .hit-text {
+    font-size: .8rem; color: var(--muted); margin-top: .05rem; line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  mark { background: var(--mark); color: var(--mark-fg); border-radius: 3px; padding: 0 .1em; }
+
+  /* ---------- empty / toast ---------- */
+
+  .empty { flex: 1; display: grid; place-items: center; padding: 2rem; }
+  .empty.hide { display: none; }
+  .empty-inner { max-width: 27rem; text-align: center; }
+  .empty .mark { width: 60px; height: 60px; border-radius: 18px; margin: 0 auto 1.15rem; }
+  .empty .mark svg { width: 30px; height: 30px; }
+  .empty h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: -.01em; margin: 0 0 .4rem; }
+  .empty p { margin: 0 0 .5rem; color: var(--muted); font-size: .875rem; line-height: 1.6; }
+  .empty .fine { font-size: .8rem; }
+  .empty .spinner { margin: .9rem auto 0; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 1.1rem; transform: translateX(-50%);
+    z-index: 60; max-width: 32rem;
+    background: var(--fg); color: var(--bg);
+    border-radius: 10px; padding: .5rem .85rem; font-size: .82rem;
+    box-shadow: var(--pop); display: none;
+  }
+  .toast.show { display: block; }
+  .toast.bad { background: var(--warn); color: #fff; }
+
+  .sr {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* ---------- responsive ---------- */
+
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; }
+    .main { display: none; }
+    .app.thread-open .sidebar { display: none; }
+    .app.thread-open .main { display: flex; }
+    .back { display: inline-flex; }
+    .messages { padding: .85rem .9rem 1rem; }
+    .composer { padding: .55rem .9rem .7rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; border-top-color: var(--border); }
+    .msg.flash { animation: none; }
+    * { scroll-behavior: auto !important; }
+  }
+</style>
+
+<!--
+  Icon set. Static markup, cloned by id at runtime — the only place in this file
+  where markup is written as markup, and it interpolates nothing.
+-->
+<div id="icons" aria-hidden="true">
+  <svg id="i-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/></svg>
+  <svg id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+  <svg id="i-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5-7 7 7 7"/></svg>
+  <svg id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h14m-6-6 6 6-6 6"/></svg>
+  <svg id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-2.5 4 3.5"/></svg>
+  <svg id="i-reply" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7 4 12l5 5"/><path d="M4 12h9a7 7 0 0 1 7 7v1"/></svg>
+  <svg id="i-more" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+  <svg id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10-10a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5z"/></svg>
+  <svg id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+  <svg id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+  <svg id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M18 6 6 18"/></svg>
+  <svg id="i-jump" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13m0 0-5-5m5 5 5-5"/></svg>
+  <svg id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/></svg>
+  <svg id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zm0 0v5h5"/></svg>
+  <svg id="i-broken" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6"/></svg>
+</div>
+
+<div class="app" id="app">
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="brand">
+        <div class="mark" id="brandMark" aria-hidden="true"></div>
+        <div class="brand-name">GroupMe</div>
+        <div class="pill" id="conn" title="Connection state"><span class="dot"></span><span id="connText">Starting</span></div>
+        <button class="uiswap" id="uiswap" type="button"
+                title="Switch to the GroupMe web UI (remembered as your preference)">Web UI</button>
+      </div>
+      <div class="search" id="searchWrap">
+        <input type="search" id="q" placeholder="Search all messages"
+               aria-label="Search every archived message" autocomplete="off" spellcheck="false" />
+        <span class="search-hint">/</span>
+      </div>
+    </div>
+    <div class="list" id="list" role="list"></div>
+    <div class="side-foot" id="stats">Opening the local archive…</div>
+  </aside>
+
+  <main class="main">
+    <div class="empty" id="empty">
+      <div class="empty-inner">
+        <div class="mark" id="emptyMark" aria-hidden="true"></div>
+        <h1 id="emptyTitle">Pick a conversation</h1>
+        <p id="emptyText">Everything is read from the copy of your history kept on this computer, so it opens instantly and every message is searchable.</p>
+        <p class="fine" id="emptyFine">Press <b>/</b> to search, <b>Esc</b> to clear.</p>
+        <div id="emptySpin"></div>
+      </div>
+    </div>
+
+    <div class="thread" id="thread">
+      <header class="thread-head">
+        <button class="back" id="back" type="button" aria-label="Back to conversations"></button>
+        <div class="thread-headtext">
+          <h1 class="thread-title" id="tTitle"></h1>
+          <div class="thread-sub" id="tSub"></div>
+        </div>
+        <div class="head-actions">
+          <button class="hbtn" id="toLatest" type="button" title="Jump to latest" aria-label="Jump to the newest message"></button>
+        </div>
+      </header>
+
+      <div class="banner" id="banner">
+        <span id="bannerText"></span>
+        <button type="button" id="bannerBtn"></button>
+      </div>
+
+      <div class="scroller" id="scroller">
+        <div class="top-state" id="topState"></div>
+        <div class="messages" id="messages"></div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-inner">
+          <div class="ctx" id="ctx">
+            <div class="ctx-body">
+              <div class="ctx-title" id="ctxTitle"></div>
+              <div class="ctx-text" id="ctxText"></div>
+            </div>
+            <button class="ctx-x" id="ctxX" type="button" aria-label="Cancel"></button>
+          </div>
+          <div class="drafts" id="drafts"></div>
+          <div class="composer-box">
+            <textarea id="input" rows="1" placeholder="Message" aria-label="Message"
+                      autocomplete="off" spellcheck="true"></textarea>
+            <button class="cbtn" id="attachBtn" type="button" title="Attach an image" aria-label="Attach an image"></button>
+            <button class="cbtn go" id="sendBtn" type="button" title="Send" aria-label="Send"></button>
+          </div>
+          <div class="composer-foot">
+            <span class="grow" id="cnote"></span>
+            <span class="count" id="ccount"></span>
+          </div>
+          <input type="file" id="file" accept="image/*" multiple class="sr" tabindex="-1" aria-hidden="true" />
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="pop pop-emoji" id="emojiPop" role="menu" aria-label="React with"></div>
+<div class="pop menu" id="menuPop" role="menu" aria-label="Message actions"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ================================ IPC ================================= */
+
+  var TAURI = window.__TAURI__;
+  var HAS_IPC = !!(TAURI && TAURI.core && typeof TAURI.core.invoke === "function");
+  var HAS_EVENTS = !!(HAS_IPC && TAURI.event && typeof TAURI.event.listen === "function");
+
+  // Reads. A failure here is a degraded view, not a lost action, so it is logged
+  // and reported as null; callers decide what "no data" means in their context.
+  async function call(cmd, args) {
+    if (!HAS_IPC) return demo(cmd, args || {});
+    try {
+      return await TAURI.core.invoke(cmd, args || {});
+    } catch (e) {
+      console.warn(cmd + " failed:", e);
+      return null;
+    }
+  }
+
+  // Writes. Deliberately *not* swallowed: a send that silently does nothing is
+  // the worst outcome available, so the rejection propagates and every caller
+  // is required to surface it. `client_*` commands reject with a plain string.
+  async function write(cmd, args) {
+    if (!HAS_IPC) throw new Error("Sending isn't available in this window.");
+    try {
+      return await TAURI.core.invoke(cmd, args || {});
+    } catch (e) {
+      var msg = typeof e === "string" ? e : (e && e.message) || "the request failed";
+      var err = new Error(msg);
+      err.ipc = true;
+      throw err;
+    }
+  }
+
+  function localSrc(path) {
+    if (!path) return null;
+    try {
+      if (HAS_IPC && typeof TAURI.core.convertFileSrc === "function") {
+        return TAURI.core.convertFileSrc(path);
+      }
+    } catch (e) { /* fall through */ }
+    return path;
+  }
+
+  /* ========================= realtime adapters ==========================
+     Every assumption about what realtime.rs emits lives in these four
+     functions and nowhere else. See the file header for the documented shapes.
+     Each one returns a normalised object or null; null is dropped silently
+     rather than guessed at, because acting on a misread frame is worse than
+     missing one — the next sync repairs a missed frame.                    */
+
+  function unwrap(p) {
+    // Tauri hands the handler `{ payload, event, id }`; a raw payload is also
+    // accepted so the adapters can be exercised directly.
+    if (p && typeof p === "object" && "payload" in p && !("id" in p && "text" in p)) {
+      return p.payload;
+    }
+    return p;
+  }
+
+  function fld(o) {
+    for (var i = 1; i < arguments.length; i++) {
+      if (o && o[arguments[i]] !== undefined && o[arguments[i]] !== null) return o[arguments[i]];
+    }
+    return null;
+  }
+
+  function adaptMessage(raw) {
+    var p = unwrap(raw);
+    if (!p || typeof p !== "object") return null;
+    var m = (p.id != null && (p.text !== undefined || p.created_at !== undefined || p.createdAt !== undefined))
+      ? p
+      : (p.message || p.msg || p.data || null);
+    if (!m || typeof m !== "object" || m.id == null) return null;
+    var cid = fld(p, "conversation_id", "conversationId") ||
+              fld(m, "group_id", "groupId") ||
+              fld(m, "conversation_id", "conversationId");
+    if (cid == null) return null;
+    return { cid: String(cid), msg: m };
+  }
+
+  function adaptReaction(raw) {
+    var p = unwrap(raw);
+    if (!p || typeof p !== "object") return null;
+    var m = p.message || p.msg || null;
+    var cid = fld(p, "conversation_id", "conversationId") ||
+              (m && (fld(m, "group_id", "groupId") || fld(m, "conversation_id", "conversationId")));
+    var mid = fld(p, "message_id", "messageId") || (m && m.id) || (p.id != null ? p.id : null);
+    if (cid == null || mid == null) return null;
+
+    var list = fld(p, "reactions") || (m && fld(m, "reactions"));
+    if (!Array.isArray(list)) {
+      // Some frames carry only the like roster. Normalise it into the one
+      // reaction row the renderer already understands.
+      var favs = fld(p, "favorited_by", "favoritedBy") || (m && fld(m, "favorited_by", "favoritedBy"));
+      list = Array.isArray(favs) ? [{ type: "like", user_ids: favs.map(String) }] : null;
+    }
+    if (!Array.isArray(list)) return null;
+    return { cid: String(cid), mid: String(mid), reactions: list };
+  }
+
+  function adaptTyping(raw) {
+    var p = unwrap(raw);
+    if (!p || typeof p !== "object") return null;
+    var cid = fld(p, "conversation_id", "conversationId", "group_id", "groupId");
+    if (cid == null) return null;
+    var uid = fld(p, "user_id", "userId", "sender_id", "senderId");
+    var until = fld(p, "until", "expires_at", "expiresAt");
+    var ms = null;
+    if (until != null && isFinite(Number(until))) {
+      var n = Number(until);
+      ms = n > 1e11 ? n : n * 1000;
+    }
+    return {
+      cid: String(cid),
+      uid: uid == null ? "?" : String(uid),
+      name: fld(p, "name", "nickname", "user_name", "userName"),
+      until: ms == null ? Date.now() + 6000 : ms
+    };
+  }
+
+  function adaptState(raw) {
+    var p = unwrap(raw);
+    if (typeof p === "boolean") return { connected: p, label: p ? "Live" : "Offline" };
+    if (typeof p === "string") {
+      var s = p.toLowerCase();
+      return { connected: s === "connected" || s === "live" || s === "open" || s === "ready", label: p };
+    }
+    if (!p || typeof p !== "object") return null;
+    var c = fld(p, "connected", "online", "ok", "is_connected", "isConnected");
+    var label = fld(p, "state", "status", "label");
+    if (c == null && label == null) return null;
+    if (c == null) {
+      var t = String(label).toLowerCase();
+      c = t === "connected" || t === "live" || t === "open" || t === "ready";
+    }
+    return { connected: !!c, label: label == null ? (c ? "Live" : "Offline") : String(label) };
+  }
+
+  /* =============================== ids ==================================
+     Never Number(), never parseInt(). GroupMe ids are 18-digit decimal
+     strings; a double rounds them in steps of 32.                          */
+
+  var NUMERIC = /^[0-9]+$/;
+
+  function cmpId(a, b) {
+    a = a == null ? "" : String(a);
+    b = b == null ? "" : String(b);
+    if (NUMERIC.test(a) && NUMERIC.test(b)) {
+      if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+    }
+    return a < b ? -1 : (a > b ? 1 : 0);
+  }
+
+  // The exclusive `beforeId` cursor that yields `id` itself as the newest row.
+  // `messages_page` filters on `id_sort < before_sort`, so the anchor has to be
+  // one past the target. BigInt is exact at this magnitude; a double is not.
+  function idPlusOne(id) {
+    var s = String(id == null ? "" : id);
+    if (!NUMERIC.test(s)) return null;
+    try { return (BigInt(s) + BigInt(1)).toString(); } catch (e) { return null; }
+  }
+
+  /* ============================= DOM helpers ============================= */
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // The one and only way data reaches the DOM in this file: as a text node.
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = String(text);
+    return n;
+  }
+
+  function btn(cls, label, onClick) {
+    var b = el("button", cls);
+    b.type = "button";
+    if (label) { b.title = label; b.setAttribute("aria-label", label); }
+    if (onClick) b.addEventListener("click", onClick);
+    return b;
+  }
+
+  // Clones a static icon from the hidden set. No interpolation, ever.
+  function icon(name) {
+    var src = $("i-" + name);
+    if (!src) return document.createDocumentFragment();
+    var n = src.cloneNode(true);
+    n.removeAttribute("id");
+    n.setAttribute("aria-hidden", "true");
+    return n;
+  }
+
+  function withIcon(node, name) { node.appendChild(icon(name)); return node; }
+
+  var toastTimer = null;
+  function toast(text, bad) {
+    var t = $("toast");
+    t.textContent = String(text);
+    t.classList.toggle("bad", !!bad);
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove("show"); }, bad ? 6000 : 3200);
+  }
+
+  /* ============================ time helpers ============================= */
+
+  // Epoch seconds is the GroupMe convention; tolerate milliseconds anyway.
+  // Timestamps are ordinary numbers well inside the safe range — unlike ids.
+  function toDate(v) {
+    if (v == null) return null;
+    var n = Number(v);
+    if (!isFinite(n) || n <= 0) return null;
+    return new Date(n > 1e11 ? n : n * 1000);
+  }
+
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+
+  function relTime(v) {
+    var d = toDate(v);
+    if (!d) return "";
+    var now = new Date();
+    var secs = Math.floor((now - d) / 1000);
+    if (secs < 45) return "now";
+    if (secs < 3600) return Math.max(1, Math.floor(secs / 60)) + "m";
+    var days = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (days <= 0) return Math.max(1, Math.floor(secs / 3600)) + "h";
+    if (days === 1) return "Yesterday";
+    if (days < 7) return DAYS[d.getDay()].slice(0, 3);
+    if (d.getFullYear() === now.getFullYear()) return MONTHS[d.getMonth()] + " " + d.getDate();
+    return MONTHS[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear();
+  }
+
+  function clockTime(v) {
+    var d = toDate(v);
+    if (!d) return "";
+    var h = d.getHours(), m = d.getMinutes();
+    var ampm = h >= 12 ? "PM" : "AM";
+    h = h % 12; if (h === 0) h = 12;
+    return h + ":" + (m < 10 ? "0" + m : m) + " " + ampm;
+  }
+
+  function dayLabel(v) {
+    var d = toDate(v);
+    if (!d) return "";
+    var now = new Date();
+    var days = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (days === 0) return "Today";
+    if (days === 1) return "Yesterday";
+    var base = DAYS[d.getDay()] + ", " + MONTHS[d.getMonth()] + " " + d.getDate();
+    return d.getFullYear() === now.getFullYear() ? base : base + ", " + d.getFullYear();
+  }
+
+  function nowSecs() { return Math.floor(Date.now() / 1000); }
+
+  function initials(name) {
+    var parts = String(name || "?").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return "?";
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+
+  var HUES = ["#3c16d3", "#0d7a5f", "#a3341f", "#1d5fa8", "#7a2a8c", "#8a5a10", "#0f6f86", "#a02a5c"];
+  function tintFor(seed) {
+    var s = String(seed || ""), h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return HUES[h % HUES.length];
+  }
+
+  /* ============================== state ================================= */
+
+  var PAGE = 60;              // messages per archive page
+  var CHUNK_MAX = 80;         // rows per virtualised chunk
+  var KEEP_MARGIN = "1400px"; // how far outside the viewport a chunk stays live
+  var GROUP_WINDOW = 5 * 60;  // seconds within which a sender's rows group
+  var MAX_TEXT = 1000;        // mirrors client_commands::MAX_TEXT_CHARS
+  var REACTIONS = ["❤️", "👍", "😂", "😮", "😢", "🎉"];
+
+  var state = {
+    convos: [],
+    byId: Object.create(null),
+    active: null,           // conversation id
+    activeKind: "group",
+    chunks: [],             // the loaded slice of this thread, oldest-first
+    msgById: new Map(),     // id string -> message object
+    nodeById: new Map(),    // id string -> rendered row (materialised chunks only)
+    pendingQuotes: [],      // quote nodes whose target has not been paged in
+    cursor: null,           // raw id string; beforeId for the next older page
+    hasMore: true,
+    loading: false,
+    anchored: false,        // viewing an older slice reached from search
+    atBottom: true,
+    seq: 0,                 // guards a stale page landing after a switch
+    selfId: null,
+    accountName: null,
+    connected: null,
+    mediaCache: new Map(),
+    mediaPending: new Map(),
+    localPreview: new Map(),// uploaded url -> data: url, for this session only
+    typing: new Map(),      // conversation id -> Map(userId -> {name, until})
+    reply: null,            // { id, name, text }
+    editing: null,          // { id, original }
+    drafts: [],             // { url, dataUrl, uploading, error }
+    readAt: Object.create(null),
+    sending: false
+  };
+
+  /* --------- last-read bookkeeping ---------
+     The archive tracks no unread state, so it is kept locally: a conversation
+     is unread when its newest message is newer than the last time this window
+     had it open. Timestamps, not ids — the conversation row carries
+     `last_message_created_at` but no last message *id*, and a timestamp is an
+     ordinary safe number. `client_mark_read` still gets the real id, which is
+     known once the thread is open. */
+
+  var READ_KEY = "groupme.readAt.v1";
+
+  function loadReadAt() {
+    try {
+      var raw = window.localStorage.getItem(READ_KEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && typeof o === "object") state.readAt = o;
+      }
+      var self = window.localStorage.getItem("groupme.selfId.v1");
+      if (self) state.selfId = String(self);
+    } catch (e) { /* private mode, corrupt value: unread just resets */ }
+  }
+
+  function saveReadAt() {
+    try { window.localStorage.setItem(READ_KEY, JSON.stringify(state.readAt)); } catch (e) { /* ignore */ }
+  }
+
+  function rememberSelf(id) {
+    if (!id || state.selfId === String(id)) return;
+    state.selfId = String(id);
+    try { window.localStorage.setItem("groupme.selfId.v1", state.selfId); } catch (e) { /* ignore */ }
+  }
+
+  function convoStamp(c) {
+    return Number(fld(c, "last_message_created_at", "lastMessageCreatedAt") || fld(c, "updated_at", "updatedAt") || 0);
+  }
+
+  function isUnread(c) {
+    var seen = Number(state.readAt[c.id] || 0);
+    return convoStamp(c) > seen;
+  }
+
+  /* =========================== preview data =============================
+     Used only when the page is opened outside the app, so a designer can load
+     the file in a browser and see something. Every id below is synthetic and
+     of the same shape as the real thing: user 200000xx, group 100000xx,
+     message 1700000000000000xx. No real account appears in this file.      */
+
+  var T0 = nowSecs();
+  var DEMO_CONVOS = [
+    { id: "10000001", kind: "group", name: "Sample Group", image_url: null, updated_at: T0 - 300,
+      messages_count: 1420, last_message_text: "Sounds good, see you then",
+      last_message_created_at: T0 - 300 },
+    { id: "20000001+20000002", kind: "dm", name: "Sample Contact", image_url: null,
+      updated_at: T0 - 86400, messages_count: 96, last_message_text: "sent a photo",
+      last_message_created_at: T0 - 86400 }
+  ];
+  var DEMO_MSGS = {
+    "10000001": [
+      { id: "170000000000000004", user_id: "20000002", name: "Sample Contact", text: "Sounds good, see you then",
+        created_at: T0 - 300, system: false, attachments: [], reactions: [{ type: "unicode", code: "👍", user_ids: ["20000001"] }] },
+      { id: "170000000000000003", user_id: "20000001", name: "Sample Account", text: "Six o'clock works for me",
+        created_at: T0 - 360, system: false,
+        attachments: [{ type: "reply", reply_id: "170000000000000002", user_id: "20000002" }], reactions: [] },
+      { id: "170000000000000002", user_id: "20000002", name: "Sample Contact", text: "What time are we meeting?",
+        created_at: T0 - 900, system: false, attachments: [], reactions: [] },
+      { id: "170000000000000001", user_id: "20000003", name: "GroupMe", text: "Sample Contact joined the group",
+        created_at: T0 - 90000, system: true, attachments: [], reactions: [] }
+    ]
+  };
+
+  function demo(cmd, args) {
+    if (cmd === "archive_conversations") return DEMO_CONVOS.slice();
+    if (cmd === "archive_messages") {
+      if (args.beforeId != null) return [];
+      return (DEMO_MSGS[args.conversationId] || []).slice();
+    }
+    if (cmd === "archive_search") {
+      var q = String(args.query || "").toLowerCase(), out = [];
+      Object.keys(DEMO_MSGS).forEach(function (cid) {
+        DEMO_MSGS[cid].forEach(function (m) {
+          if (m.text && m.text.toLowerCase().indexOf(q) >= 0) {
+            out.push({ message_id: m.id, conversation_id: cid, conversation_name: "Sample Group",
+              sender_name: m.name, text: m.text, created_at: m.created_at });
+          }
+        });
+      });
+      return out;
+    }
+    if (cmd === "archive_media_path") return null;
+    if (cmd === "archive_stats") {
+      return { conversations: 2, messages: 1516, last_sync_at: T0 - 120, account_name: "Sample Account" };
+    }
+    return null;
+  }
+
+  /* ============================ cached media ============================
+     A remote URL is never used. It would be blocked by the CSP, it points at
+     an expiring signed CDN link, and offline it would render as a broken icon
+     in the middle of a conversation. Only a locally cached copy is shown.   */
+
+  function resolveMedia(url) {
+    if (!url) return Promise.resolve(null);
+    var key = String(url);
+    if (state.mediaCache.has(key)) return Promise.resolve(state.mediaCache.get(key));
+    if (state.mediaPending.has(key)) return state.mediaPending.get(key);
+    var pending = call("archive_media_path", { url: key }).then(function (p) {
+      state.mediaCache.set(key, p || null);
+      state.mediaPending.delete(key);
+      return p || null;
+    }, function () {
+      state.mediaPending.delete(key);
+      return null;
+    });
+    state.mediaPending.set(key, pending);
+    return pending;
+  }
+
+  function makeAvatar(name, url, seed, cls) {
+    var node = el("div", "avatar" + (cls ? " " + cls : ""), initials(name));
+    node.style.background = tintFor(seed || name);
+    node.setAttribute("aria-hidden", "true");
+    if (url) {
+      resolveMedia(url).then(function (path) {
+        if (!path || !node.isConnected) return;
+        var img = el("img", node.className);
+        img.src = localSrc(path);
+        img.alt = "";
+        img.onload = function () { if (node.isConnected) node.replaceWith(img); };
+      });
+    }
+    return node;
+  }
+
+  /* ============================== sidebar =============================== */
+
+  var listEl = $("list");
+
+  async function loadConversations() {
+    var rows = await call("archive_conversations");
+    state.convos = Array.isArray(rows) ? rows : [];
+    state.byId = Object.create(null);
+    state.convos.forEach(function (c) { state.byId[c.id] = c; });
+    inferSelfFromDms();
+    if (!searchActive()) renderConversations();
+    return state.convos.length;
+  }
+
+  // Which account is signed in, without a command that reports it.
+  //
+  // A DM's thread key is "<a>+<b>", so the id common to two different DM
+  // threads is ours. With fewer than two DMs it is genuinely ambiguous and the
+  // answer stays null rather than becoming a guess — a wrong answer here would
+  // put someone else's messages on the right-hand side and offer to delete
+  // them. A sent message settles it for good (see rememberSelf).
+  function inferSelfFromDms() {
+    if (state.selfId) return;
+    var counts = Object.create(null), threads = 0;
+    state.convos.forEach(function (c) {
+      if (c.kind !== "dm" || typeof c.id !== "string" || c.id.indexOf("+") < 0) return;
+      threads++;
+      var seen = Object.create(null);
+      c.id.split("+").forEach(function (half) {
+        half = half.trim();
+        if (!half || seen[half]) return;
+        seen[half] = 1;
+        counts[half] = (counts[half] || 0) + 1;
+      });
+    });
+    if (threads < 2) return;
+    var winner = null;
+    Object.keys(counts).forEach(function (k) {
+      if (counts[k] === threads) winner = winner === null ? k : false;
+    });
+    if (winner) rememberSelf(winner);
+  }
+
+  function convoTitle(c) {
+    return (c && c.name) || (c && c.kind === "dm" ? "Direct message" : "Untitled group");
+  }
+
+  function renderConversations() {
+    listEl.textContent = "";
+    if (!state.convos.length) {
+      listEl.appendChild(el("div", "side-empty",
+        "No conversations have been archived yet. The first sync is still running."));
+      return;
+    }
+    var unread = state.convos.filter(isUnread).length;
+    var label = el("div", "list-label", "Conversations");
+    if (unread) label.appendChild(el("span", "sub", unread + " unread"));
+    listEl.appendChild(label);
+    var frag = document.createDocumentFragment();
+    state.convos.forEach(function (c) { frag.appendChild(convoRow(c)); });
+    listEl.appendChild(frag);
+  }
+
+  function convoRow(c) {
+    var name = convoTitle(c);
+    var row = el("button", "row");
+    row.type = "button";
+    row.setAttribute("role", "listitem");
+    if (state.active === c.id) row.classList.add("active");
+    if (isUnread(c)) row.classList.add("unread");
+    row.dataset.cid = c.id;
+
+    row.appendChild(makeAvatar(name, fld(c, "image_url", "imageUrl"), c.id, c.kind === "group" ? "square" : null));
+
+    var body = el("div", "row-body");
+    var top = el("div", "row-top");
+    top.appendChild(el("div", "row-name", name));
+    top.appendChild(el("div", "row-time", relTime(convoStamp(c))));
+    if (isUnread(c)) top.appendChild(el("div", "unread-dot"));
+    body.appendChild(top);
+
+    var prev = fld(c, "last_message_text", "lastMessageText");
+    body.appendChild(el("div", "row-prev", prev ? String(prev).replace(/\s+/g, " ") : "No messages yet"));
+    row.appendChild(body);
+
+    row.addEventListener("click", function () { openConversation(c.id); });
+    return row;
+  }
+
+  // Moves one conversation to the top and repaints only the rows that changed,
+  // rather than rebuilding a list that can hold hundreds of entries.
+  function touchConversation(cid, text, stamp) {
+    var c = state.byId[cid];
+    if (!c) return;
+    if (text != null) c.last_message_text = text;
+    if (stamp != null) c.last_message_created_at = stamp;
+    var i = state.convos.indexOf(c);
+    if (i > 0) { state.convos.splice(i, 1); state.convos.unshift(c); }
+    if (searchActive()) return;
+    var existing = listEl.querySelector('.row[data-cid="' + cssEscape(cid) + '"]');
+    var fresh = convoRow(c);
+    if (existing && i === 0) { existing.replaceWith(fresh); return; }
+    if (existing) existing.remove();
+    var first = listEl.querySelector(".row");
+    if (first) listEl.insertBefore(fresh, first); else listEl.appendChild(fresh);
+  }
+
+  function cssEscape(v) {
+    var s = String(v);
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(s);
+    return s.replace(/["\\]/g, "\\$&");
+  }
+
+  async function loadStats() {
+    var s = await call("archive_stats");
+    if (!s) { $("stats").textContent = "Local archive"; return null; }
+    var msgs = Number(fld(s, "messages") || 0);
+    var convs = Number(fld(s, "conversations") || 0);
+    var synced = fld(s, "last_sync_at", "lastSyncAt");
+    state.accountName = fld(s, "account_name", "accountName") || null;
+
+    var bits = [];
+    bits.push(msgs.toLocaleString() + (msgs === 1 ? " message" : " messages"));
+    bits.push(convs.toLocaleString() + (convs === 1 ? " conversation" : " conversations"));
+    if (!synced) {
+      bits.push("never synced");
+    } else {
+      var r = relTime(synced);
+      bits.push(r === "now" ? "synced just now"
+        : /^\d+[mh]$/.test(r) ? "synced " + r + " ago"
+        : "synced " + r);
+    }
+    var foot = $("stats");
+    foot.textContent = bits.join(" · ");
+    foot.title = state.accountName ? "Signed in as " + state.accountName : "";
+    return s;
+  }
+
+  /* ========================== virtualised log ===========================
+
+     The thread is held as an ordered list of chunks, oldest first. A chunk
+     owns up to CHUNK_MAX messages and one DOM element. When it scrolls further
+     than KEEP_MARGIN outside the viewport its rows are dropped and the element
+     keeps its measured height as a spacer; when it comes back, the rows are
+     rebuilt. So the number of live DOM rows is bounded by the viewport, not by
+     the size of the conversation — a 142,000-message thread costs the same as
+     a 40-message one.
+
+     Two properties this buys, both of which have been broken here before:
+       * a new message appends exactly one row to one chunk. Nothing else in
+         the thread is touched, so live traffic is O(1), not O(N) per frame
+         (and not O(N²) across a burst).
+       * paging older rebuilds at most the newest chunk of the page and the one
+         row whose day separator or sender grouping the page can change.       */
+
+  var scroller = $("scroller"), msgsEl = $("messages"), topState = $("topState");
+
+  var observer = ("IntersectionObserver" in window)
+    ? new IntersectionObserver(onChunkVisibility, { root: scroller, rootMargin: KEEP_MARGIN, threshold: 0 })
+    : null;
+
+  function onChunkVisibility(entries) {
+    entries.forEach(function (e) {
+      var chunk = e.target.__chunk;
+      if (!chunk) return;
+      if (e.isIntersecting) materialise(chunk); else dematerialise(chunk);
+    });
+  }
+
+  function newChunk(msgs) {
+    var node = el("div", "chunk");
+    var chunk = { el: node, msgs: msgs || [], live: false };
+    node.__chunk = chunk;
+    return chunk;
+  }
+
+  function chunkIndex(chunk) { return state.chunks.indexOf(chunk); }
+
+  function prevOf(ci, mi) {
+    if (mi > 0) return state.chunks[ci].msgs[mi - 1];
+    for (var i = ci - 1; i >= 0; i--) {
+      var prior = state.chunks[i].msgs;
+      if (prior.length) return prior[prior.length - 1];
+    }
+    return null;
+  }
+
+  function materialise(chunk) {
+    if (chunk.live) return;
+    var ci = chunkIndex(chunk);
+    if (ci < 0) return;
+    chunk.el.style.height = "";
+    chunk.el.appendChild(buildRows(chunk.msgs, prevOf(ci, 0)));
+    chunk.live = true;
+    fillPendingQuotes();
+  }
+
+  function dematerialise(chunk) {
+    if (!chunk.live) return;
+    var h = chunk.el.offsetHeight;
+    // A zero height would collapse the scroll range and yank the viewport.
+    // Better to keep a chunk alive than to lose the reader's place.
+    if (!h) return;
+    chunk.msgs.forEach(function (m) { if (m && m.id != null) state.nodeById.delete(String(m.id)); });
+    state.pendingQuotes = state.pendingQuotes.filter(function (p) { return p.node.isConnected; });
+    chunk.el.textContent = "";
+    chunk.el.style.height = h + "px";
+    chunk.live = false;
+  }
+
+  function rebuildChunk(chunk) {
+    if (!chunk.live) return;
+    var ci = chunkIndex(chunk);
+    if (ci < 0) return;
+    chunk.msgs.forEach(function (m) { if (m && m.id != null) state.nodeById.delete(String(m.id)); });
+    chunk.el.textContent = "";
+    chunk.el.appendChild(buildRows(chunk.msgs, prevOf(ci, 0)));
+    fillPendingQuotes();
+  }
+
+  function clearThreadDom() {
+    if (observer) state.chunks.forEach(function (c) { observer.unobserve(c.el); });
+    state.chunks = [];
+    state.msgById = new Map();
+    state.nodeById = new Map();
+    state.pendingQuotes = [];
+    msgsEl.textContent = "";
+  }
+
+  function indexMessages(list) {
+    list.forEach(function (m) { if (m && m.id != null) state.msgById.set(String(m.id), m); });
+  }
+
+  function newestLoaded() {
+    for (var i = state.chunks.length - 1; i >= 0; i--) {
+      var m = state.chunks[i].msgs;
+      if (m.length) return m[m.length - 1];
+    }
+    return null;
+  }
+
+  // Appends a page of *newer* messages (oldest-first) at the bottom.
+  function appendChunk(msgs) {
+    if (!msgs.length) return;
+    var chunk = newChunk(msgs.slice());
+    state.chunks.push(chunk);
+    msgsEl.appendChild(chunk.el);
+    indexMessages(chunk.msgs);
+    // Rendered now, not when the observer next runs. The observer delivers on a
+    // later frame, and a caller that scrolls to the bottom immediately
+    // afterwards would be measuring an empty element.
+    materialise(chunk);
+    if (observer) observer.observe(chunk.el);
+  }
+
+  // Inserts a page of *older* messages (oldest-first) at the top, preserving
+  // the reader's scroll position.
+  function prependChunk(msgs) {
+    if (!msgs.length) return;
+    var before = scroller.scrollHeight;
+    var chunk = newChunk(msgs.slice());
+    state.chunks.unshift(chunk);
+    msgsEl.insertBefore(chunk.el, msgsEl.firstChild);
+    indexMessages(chunk.msgs);
+    materialise(chunk);
+    if (observer) observer.observe(chunk.el);
+    // The chunk that used to be first can change: its opening day separator may
+    // now be redundant, and its first row may now continue the sender of the
+    // page just added. One chunk, not the whole thread.
+    if (state.chunks[1]) rebuildChunk(state.chunks[1]);
+    scroller.scrollTop += scroller.scrollHeight - before;
+  }
+
+  // The live path. One row, one chunk, no re-render.
+  function appendLive(m) {
+    if (!m || m.id == null) return;
+    var key = String(m.id);
+    if (state.msgById.has(key)) { replaceMessage(m); return; }
+
+    // Out-of-order frames happen: a backfill lands while a live message is in
+    // flight. Appending an older message at the bottom would put it visibly in
+    // the wrong place, and it is already on its way into the archive, so it is
+    // left for the next open. Only checked when both ids are real GroupMe ids —
+    // an optimistic row's id is not one, and comparing against it would drop
+    // every genuine message.
+    var newest = newestLoaded();
+    if (newest && NUMERIC.test(String(newest.id)) && NUMERIC.test(key) &&
+        cmpId(key, String(newest.id)) < 0) {
+      return;
+    }
+
+    var last = state.chunks[state.chunks.length - 1];
+    if (!last || last.msgs.length >= CHUNK_MAX) {
+      appendChunk([m]);
+      return;
+    }
+    var stick = state.atBottom;
+    last.msgs.push(m);
+    state.msgById.set(key, m);
+    if (last.live) {
+      var ci = chunkIndex(last);
+      last.el.appendChild(rowFragment(m, prevOf(ci, last.msgs.length - 1)));
+      fillPendingQuotes();
+    } else {
+      // Height is stale now; let it re-measure when it comes back into view.
+      last.el.style.height = "";
+      materialise(last);
+    }
+    if (stick) scrollToBottom();
+  }
+
+  // Replaces one message in place — an edit, a delete, a reaction, or the
+  // server's copy of a message this window sent optimistically.
+  function replaceMessage(m, oldId) {
+    if (!m || m.id == null) return;
+    var newKey = String(m.id);
+    var findKey = oldId != null ? String(oldId) : newKey;
+
+    for (var ci = 0; ci < state.chunks.length; ci++) {
+      var msgs = state.chunks[ci].msgs;
+      for (var mi = 0; mi < msgs.length; mi++) {
+        if (msgs[mi] && String(msgs[mi].id) === findKey) {
+          msgs[mi] = m;
+          state.msgById.delete(findKey);
+          state.msgById.set(newKey, m);
+          var node = state.nodeById.get(findKey);
+          state.nodeById.delete(findKey);
+          if (node && node.isConnected) {
+            var cont = node.classList.contains("cont");
+            var fresh = renderMessage(m, cont);
+            node.replaceWith(fresh);
+            fillPendingQuotes();
+          }
+          return;
+        }
+      }
+    }
+  }
+
+  function removeMessage(id) {
+    var key = String(id);
+    for (var ci = 0; ci < state.chunks.length; ci++) {
+      var msgs = state.chunks[ci].msgs;
+      for (var mi = 0; mi < msgs.length; mi++) {
+        if (msgs[mi] && String(msgs[mi].id) === key) {
+          msgs.splice(mi, 1);
+          state.msgById.delete(key);
+          var node = state.nodeById.get(key);
+          state.nodeById.delete(key);
+          if (node && node.isConnected) node.remove();
+          return;
+        }
+      }
+    }
+  }
+
+  /* ------------------------- row construction ------------------------- */
+
+  function rowFragment(m, prev) {
+    var frag = document.createDocumentFragment();
+    var stamp = fld(m, "created_at", "createdAt");
+    var d = toDate(stamp);
+    var day = d ? startOfDay(d) : null;
+    var pd = prev ? toDate(fld(prev, "created_at", "createdAt")) : null;
+    var pday = pd ? startOfDay(pd) : null;
+
+    var newDay = day !== null && day !== pday;
+    if (newDay) {
+      var sep = el("div", "day");
+      sep.appendChild(el("span", null, dayLabel(stamp)));
+      frag.appendChild(sep);
+    }
+
+    if (m.system) {
+      frag.appendChild(el("div", "sys", m.text || "System message"));
+      return frag;
+    }
+
+    var cont = !newDay && !!prev && !prev.system &&
+      prev.user_id != null && String(prev.user_id) === String(m.user_id) &&
+      Math.abs(Number(stamp) - Number(fld(prev, "created_at", "createdAt"))) <= GROUP_WINDOW;
+
+    frag.appendChild(renderMessage(m, cont));
+    return frag;
+  }
+
+  function buildRows(msgs, prev) {
+    var frag = document.createDocumentFragment();
+    var last = prev || null;
+    for (var i = 0; i < msgs.length; i++) {
+      frag.appendChild(rowFragment(msgs[i], last));
+      last = msgs[i];
+    }
+    return frag;
+  }
+
+  /* ========================= message rendering ========================== */
+
+  function isDeleted(m) { return fld(m, "deleted_at", "deletedAt") != null; }
+  function isEdited(m) { return fld(m, "updated_at", "updatedAt") != null; }
+
+  function isMine(m) {
+    if (!m) return false;
+    if (m.__local) return true;
+    if (state.selfId && m.user_id != null) return String(m.user_id) === state.selfId;
+    // Falls back to the display name only while the id is still unknown. It is
+    // the weaker test — nicknames differ per group — so anything destructive is
+    // gated on the id, not on this.
+    return !!(state.accountName && m.name && m.name === state.accountName);
+  }
+
+  function canActOn(m) {
+    return !!(state.selfId && m && m.user_id != null && String(m.user_id) === state.selfId);
+  }
+
+  function renderMessage(m, cont) {
+    var mine = isMine(m);
+    var key = String(m.id);
+    var wrap = el("div", "msg" + (cont ? " cont" : "") + (mine ? " mine" : ""));
+    wrap.dataset.mid = key;
+
+    if (cont || mine) {
+      wrap.appendChild(el("div", "gutter"));
+    } else {
+      wrap.appendChild(makeAvatar(m.name, fld(m, "avatar_url", "avatarUrl"), m.user_id || m.name, "sm"));
+    }
+
+    var body = el("div", "msg-body");
+
+    if (!cont) {
+      var meta = el("div", "msg-meta");
+      meta.appendChild(el("span", "msg-name", m.name || "Unknown"));
+      meta.appendChild(el("span", "msg-time", clockTime(fld(m, "created_at", "createdAt"))));
+      body.appendChild(meta);
+    }
+
+    var atts = Array.isArray(m.attachments) ? m.attachments : [];
+    var reply = atts.filter(function (a) { return a && a.type === "reply"; })[0];
+    if (reply) body.appendChild(renderQuote(reply));
+
+    if (isDeleted(m)) {
+      body.appendChild(el("div", "bubble tomb", "This message was deleted"));
+    } else {
+      var text = m.text;
+      if (text != null && String(text).length) {
+        var b = el("div", "bubble", String(text));
+        if (m.__pending) b.classList.add("pending");
+        if (isEdited(m)) b.appendChild(el("span", "edited", "(edited)"));
+        body.appendChild(b);
+      }
+      var media = atts.filter(function (a) {
+        return a && a.type !== "reply" && a.type !== "emoji" && a.type !== "mentions";
+      });
+      if (media.length) body.appendChild(renderAttachments(media));
+      if ((text == null || !String(text).length) && !media.length) {
+        var ph = el("div", "bubble tomb", "No content in the archive for this message");
+        if (isEdited(m)) ph.appendChild(el("span", "edited", "(edited)"));
+        body.appendChild(ph);
+      }
+    }
+
+    var reacts = renderReactions(m);
+    if (reacts) body.appendChild(reacts);
+
+    wrap.appendChild(body);
+    if (!m.__pending && !m.system) wrap.appendChild(rowActions(m));
+
+    state.nodeById.set(key, wrap);
+    return wrap;
+  }
+
+  function rowActions(m) {
+    var box = el("div", "acts");
+    box.appendChild(withIcon(btn("act", "Reply", function (e) {
+      e.stopPropagation(); startReply(m);
+    }), "reply"));
+    var react = btn("act", "React", function (e) {
+      e.stopPropagation(); openEmojiPicker(e.currentTarget, m);
+    });
+    react.appendChild(el("span", "emo", "☺"));
+    box.appendChild(react);
+    box.appendChild(withIcon(btn("act", "More", function (e) {
+      e.stopPropagation(); openMessageMenu(e.currentTarget, m);
+    }), "more"));
+    return box;
+  }
+
+  function renderQuote(a) {
+    var q = el("button", "quote");
+    q.type = "button";
+    var refId = fld(a, "reply_id", "replyId") || fld(a, "base_reply_id", "baseReplyId");
+    var ref = refId == null ? null : (state.msgById.get(String(refId)) || null);
+    q.appendChild(el("b", null, ref && ref.name ? ref.name : "Replying to an earlier message"));
+    var t = ref && !isDeleted(ref) ? ref.text : null;
+    q.appendChild(el("div", "quote-text",
+      t ? String(t).replace(/\s+/g, " ") : "The quoted message isn't loaded yet"));
+    if (refId != null) {
+      q.title = "Go to the quoted message";
+      q.addEventListener("click", function (e) {
+        e.stopPropagation();
+        goToMessage(String(refId));
+      });
+    }
+    if (!ref && refId != null) state.pendingQuotes.push({ node: q, id: String(refId), att: a });
+    return q;
+  }
+
+  // A quote can name a message that only arrives with a later page. Those nodes
+  // are filled in by hand rather than by re-rendering the thread.
+  function fillPendingQuotes() {
+    if (!state.pendingQuotes.length) return;
+    var still = [];
+    state.pendingQuotes.forEach(function (p) {
+      if (!p.node.isConnected) return;
+      if (!state.msgById.has(p.id)) { still.push(p); return; }
+      p.node.replaceWith(renderQuote(p.att));
+    });
+    state.pendingQuotes = still;
+  }
+
+  function renderAttachments(list) {
+    var box = el("div", "atts");
+    list.forEach(function (a) {
+      var type = a.type || "";
+      if (type === "image" || type === "video" || type === "linked_image") {
+        var url = a.url || fld(a, "source_url", "sourceUrl") || fld(a, "preview_url", "previewUrl");
+        var slot = el("div");
+        slot.appendChild(missingAttachment(type === "video"
+          ? "This video hasn't been downloaded yet"
+          : "This image hasn't been downloaded yet"));
+        box.appendChild(slot);
+        if (!url) return;
+
+        // A just-sent image is not in the media cache yet; the local copy the
+        // user picked stands in until the next sync downloads it. Everything
+        // else must come from the cache — a remote URL is blocked by the CSP.
+        var preview = state.localPreview.get(String(url));
+        if (preview) { showImage(slot, preview, "Image you sent"); return; }
+
+        resolveMedia(url).then(function (path) {
+          if (!path || !slot.isConnected) return;
+          if (type === "video") {
+            var v = document.createElement("video");
+            v.className = "att-img";
+            v.controls = true;
+            v.preload = "metadata";
+            v.src = localSrc(path);
+            slot.textContent = "";
+            slot.appendChild(v);
+            return;
+          }
+          showImage(slot, localSrc(path), "Attached image");
+        });
+      } else if (type === "location") {
+        var name = a.name ? String(a.name) : "Shared location";
+        var coords = (a.lat != null && a.lng != null) ? " · " + a.lat + ", " + a.lng : "";
+        box.appendChild(missingAttachment(name + coords, "pin"));
+      } else if (type === "file") {
+        box.appendChild(missingAttachment("File attachment", "file"));
+      } else {
+        box.appendChild(missingAttachment("Attachment (" + (type || "unknown") + ") can't be shown here", "file"));
+      }
+    });
+    return box;
+  }
+
+  function showImage(slot, src, alt) {
+    var img = el("img", "att-img");
+    img.alt = alt;
+    img.loading = "lazy";
+    img.src = src;
+    img.onload = function () { if (slot.isConnected) { slot.textContent = ""; slot.appendChild(img); } };
+  }
+
+  function missingAttachment(label, kind) {
+    var n = el("div", "att-miss");
+    n.appendChild(icon(kind === "pin" ? "pin" : kind === "file" ? "file" : "broken"));
+    n.appendChild(el("span", null, label));
+    return n;
+  }
+
+  /* ----------------------------- reactions ----------------------------- */
+
+  // Both roster shapes are read. `favorited_by` is not a set — a live frame has
+  // been seen carrying the same account twice — so reactors are deduplicated
+  // before they are counted, exactly as the Rust side does.
+  function reactionGroups(m) {
+    var out = [];
+    var claimed = Object.create(null);
+    var list = Array.isArray(m.reactions) ? m.reactions : [];
+
+    list.forEach(function (r) {
+      if (!r) return;
+      var users = Array.isArray(fld(r, "user_ids", "userIds")) ? fld(r, "user_ids", "userIds") : [];
+      var seen = Object.create(null), ids = [];
+      users.forEach(function (u) {
+        var k = String(u);
+        if (seen[k]) return;
+        seen[k] = 1; claimed[k] = 1; ids.push(k);
+      });
+      var glyph = (r.type === "unicode" && r.code) ? String(r.code) : null;
+      out.push({
+        code: glyph,
+        glyph: glyph || "◍",
+        pack: !glyph,
+        ids: ids,
+        count: ids.length || 1
+      });
+    });
+
+    var favs = Array.isArray(fld(m, "favorited_by", "favoritedBy")) ? fld(m, "favorited_by", "favoritedBy") : [];
+    var extra = [], seenFav = Object.create(null);
+    favs.forEach(function (u) {
+      var k = String(u);
+      if (seenFav[k] || claimed[k]) return;
+      seenFav[k] = 1; extra.push(k);
+    });
+    if (extra.length) out.push({ code: null, glyph: "❤", pack: false, like: true, ids: extra, count: extra.length });
+
+    return out.filter(function (g) { return g.count > 0; });
+  }
+
+  function renderReactions(m) {
+    var groups = reactionGroups(m);
+    if (!groups.length) return null;
+    var box = el("div", "reacts");
+    groups.forEach(function (g) {
+      var own = !!(state.selfId && g.ids.indexOf(state.selfId) >= 0);
+      var chip = el("button", "react" + (own ? " own" : ""));
+      chip.type = "button";
+      chip.appendChild(el("span", "glyph", g.glyph));
+      chip.appendChild(el("span", null, String(g.count)));
+      if (g.pack) {
+        chip.title = "Reaction from GroupMe's emoji pack";
+        chip.disabled = true;
+      } else {
+        chip.title = own ? "Remove your reaction" : "React with " + g.glyph;
+        chip.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (own) doUnreact(m); else doReact(m, g.like ? null : g.code);
+        });
+      }
+      box.appendChild(chip);
+    });
+    return box;
+  }
+
+  /* ============================== thread ================================ */
+
+  var app = $("app"), emptyEl = $("empty"), threadEl = $("thread");
+  var bannerEl = $("banner"), bannerText = $("bannerText"), bannerBtn = $("bannerBtn");
+
+  function setTop(kind) {
+    topState.textContent = "";
+    if (kind === "spinner") {
+      var s = el("div", "spinner");
+      s.setAttribute("role", "status");
+      s.setAttribute("aria-label", "Loading earlier messages");
+      topState.appendChild(s);
+    } else if (kind === "start") {
+      topState.appendChild(el("div", "top-note", "Beginning of the archived history"));
+    } else if (kind === "error") {
+      topState.appendChild(el("div", "top-note", "Couldn't load earlier messages from the archive"));
+    }
+  }
+
+  function showBanner(text, label, onClick) {
+    if (!text) { bannerEl.classList.remove("show"); return; }
+    bannerText.textContent = text;
+    bannerBtn.textContent = label || "Dismiss";
+    bannerBtn.onclick = onClick || function () { bannerEl.classList.remove("show"); };
+    bannerEl.classList.add("show");
+  }
+
+  // `settle` re-pins after the next frame. Cached images and avatars resolve
+  // asynchronously and grow the log after the first scroll, which otherwise
+  // leaves the newest message just off the bottom of the viewport.
+  function scrollToBottom(settle) {
+    scroller.scrollTop = scroller.scrollHeight;
+    state.atBottom = true;
+    if (!settle) return;
+    requestAnimationFrame(function () {
+      if (state.atBottom) scroller.scrollTop = scroller.scrollHeight;
+    });
+  }
+
+  function updateSub() {
+    var c = state.byId[state.active];
+    var bits = [];
+    var typing = typingLabel(state.active);
+    if (typing) {
+      $("tSub").textContent = typing;
+      $("tSub").classList.add("typing");
+      return;
+    }
+    $("tSub").classList.remove("typing");
+    var count = c ? Number(fld(c, "messages_count", "messagesCount") || 0) : 0;
+    if (count) bits.push(count.toLocaleString() + (count === 1 ? " message" : " messages"));
+    bits.push(c && c.kind === "dm" ? "Direct message" : "Group");
+    if (state.anchored) bits.push("viewing an earlier part");
+    $("tSub").textContent = bits.join(" · ");
+  }
+
+  async function openConversation(cid, anchorId) {
+    var c = state.byId[cid];
+    state.active = cid;
+    state.activeKind = (c && c.kind) || (String(cid).indexOf("+") >= 0 ? "dm" : "group");
+    state.cursor = null;
+    state.hasMore = true;
+    state.loading = false;
+    state.anchored = false;
+    state.atBottom = true;
+    cancelReply();
+    cancelEdit();
+    clearDrafts();
+    var mySeq = ++state.seq;
+
+    app.classList.add("thread-open");
+    emptyEl.classList.add("hide");
+    threadEl.classList.add("show");
+    showBanner(null);
+
+    $("tTitle").textContent = convoTitle(c) || "Conversation";
+    updateSub();
+    clearThreadDom();
+    setTop("spinner");
+    syncComposer();
+
+    Array.prototype.forEach.call(listEl.querySelectorAll(".row"), function (r) {
+      r.classList.toggle("active", r.dataset.cid === cid);
+    });
+
+    var page = await call("archive_messages", { conversationId: cid, limit: PAGE, beforeId: null });
+    if (mySeq !== state.seq) return;
+    page = Array.isArray(page) ? page : [];
+
+    var wanted = anchorId == null ? null : String(anchorId);
+    var inPage = wanted != null && page.some(function (m) { return String(m.id) === wanted; });
+
+    if (wanted != null && !inPage) {
+      // The target is older than the newest page. `messages_page` filters on
+      // `id_sort < before`, so the anchor is the target plus one — computed
+      // with BigInt, which is exact at 18 digits where a double is not.
+      var anchor = idPlusOne(wanted);
+      if (anchor) {
+        var older = await call("archive_messages", { conversationId: cid, limit: PAGE, beforeId: anchor });
+        if (mySeq !== state.seq) return;
+        if (Array.isArray(older) && older.length) {
+          page = older;
+          state.anchored = true;
+        }
+      }
+    }
+
+    if (!page.length) {
+      state.hasMore = false;
+      setTop("");
+      msgsEl.appendChild(el("div", "side-empty",
+        "Nothing from this conversation has been archived yet. It will fill in as the sync reaches it."));
+      updateSub();
+      markRead(cid);
+      return;
+    }
+
+    var oldestFirst = page.slice().reverse();
+    appendChunk(oldestFirst);
+    state.cursor = String(page[page.length - 1].id);
+    if (page.length < PAGE) state.hasMore = false;
+    setTop(state.hasMore ? "" : "start");
+
+    if (state.anchored) {
+      showBanner("Showing this conversation up to the message you searched for.",
+        "Jump to latest", function () { openConversation(cid); });
+      updateSub();
+      // The anchor is the newest row of an anchored page, so the bottom is it.
+      scrollToBottom();
+      flashMessage(wanted);
+    } else {
+      if (wanted) { scrollToBottom(); flashMessage(wanted); }
+      else scrollToBottom(true);
+      markRead(cid);
+    }
+    updateSub();
+  }
+
+  async function loadOlder() {
+    if (state.loading || !state.hasMore || !state.active || state.cursor == null) return;
+    state.loading = true;
+    setTop("spinner");
+    var mySeq = state.seq;
+    var cid = state.active;
+
+    var page = await call("archive_messages", { conversationId: cid, limit: PAGE, beforeId: state.cursor });
+    if (mySeq !== state.seq) return;
+
+    // A rejected cursor comes back null, not empty. An empty page would read as
+    // "start of history" and quietly truncate the thread; say so instead.
+    if (page == null) {
+      state.hasMore = false;
+      state.loading = false;
+      setTop("error");
+      return;
+    }
+    page = Array.isArray(page) ? page : [];
+    if (!page.length) {
+      state.hasMore = false;
+      state.loading = false;
+      setTop("start");
+      return;
+    }
+    prependChunk(page.slice().reverse());
+    state.cursor = String(page[page.length - 1].id);
+    if (page.length < PAGE) state.hasMore = false;
+    state.loading = false;
+    setTop(state.hasMore ? "" : "start");
+  }
+
+  // Scrolls to a message that is already loaded; otherwise reopens the
+  // conversation anchored on it.
+  function goToMessage(id, cid) {
+    var key = String(id);
+    var node = state.nodeById.get(key);
+    if (node && node.isConnected) {
+      node.scrollIntoView({ block: "center" });
+      flashMessage(key);
+      return;
+    }
+    if (state.msgById.has(key)) {
+      // Loaded but its chunk is a spacer right now: bring the chunk back, then
+      // scroll once the rows exist.
+      for (var i = 0; i < state.chunks.length; i++) {
+        var ch = state.chunks[i];
+        if (ch.msgs.some(function (m) { return String(m.id) === key; })) {
+          materialise(ch);
+          var n = state.nodeById.get(key);
+          if (n && n.isConnected) { n.scrollIntoView({ block: "center" }); flashMessage(key); }
+          return;
+        }
+      }
+    }
+    openConversation(cid || state.active, key);
+  }
+
+  function flashMessage(id) {
+    if (id == null) return;
+    var node = state.nodeById.get(String(id));
+    if (!node || !node.isConnected) return;
+    node.classList.add("flash", "hit");
+    node.scrollIntoView({ block: "center" });
+    setTimeout(function () { node.classList.remove("flash"); }, 1800);
+  }
+
+  function markRead(cid) {
+    var c = state.byId[cid];
+    if (!c) return;
+    var stamp = convoStamp(c);
+    if (Number(state.readAt[cid] || 0) >= stamp) return;
+    state.readAt[cid] = stamp;
+    saveReadAt();
+    var row = listEl.querySelector('.row[data-cid="' + cssEscape(cid) + '"]');
+    if (row) row.classList.remove("unread");
+
+    var newest = newestLoaded();
+    if (!newest || newest.id == null || newest.__local) return;
+    // Best effort. A failed read receipt is not something the user can act on,
+    // so it is logged rather than shown; it is also not a lost message.
+    write("client_mark_read", { conversationId: cid, lastReadMessageId: String(newest.id) })
+      .catch(function (e) { console.warn("client_mark_read failed:", e && e.message); });
+  }
+
+  /* ------------------------------ typing ------------------------------- */
+
+  function typingLabel(cid) {
+    var m = state.typing.get(cid);
+    if (!m || !m.size) return null;
+    var now = Date.now();
+    var names = [];
+    m.forEach(function (v, k) {
+      if (v.until <= now) { m.delete(k); return; }
+      if (state.selfId && k === state.selfId) return;
+      names.push(v.name || "Someone");
+    });
+    if (!names.length) return null;
+    if (names.length === 1) return names[0] + " is typing…";
+    if (names.length === 2) return names[0] + " and " + names[1] + " are typing…";
+    return names.length + " people are typing…";
+  }
+
+  var typingTimer = setInterval(function () {
+    if (state.active && state.typing.has(state.active)) updateSub();
+  }, 2000);
+
+  /* ============================= composer =============================== */
+
+  var input = $("input"), sendBtn = $("sendBtn"), attachBtn = $("attachBtn");
+  var cnote = $("cnote"), ccount = $("ccount"), fileEl = $("file");
+  var ctxEl = $("ctx"), ctxTitle = $("ctxTitle"), ctxText = $("ctxText");
+  var draftsEl = $("drafts");
+  var localSeq = 0;
+
+  function setError(msg) {
+    cnote.textContent = msg || "";
+    cnote.className = msg ? "grow cerr" : "grow";
+  }
+
+  function autoGrow() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 136) + "px";
+  }
+
+  // `[...str].length` counts code points, matching the Rust side's `chars()`.
+  // `.length` would count UTF-16 units and reject a body of emoji that is well
+  // inside the limit.
+  function charCount(s) { return Array.from(String(s)).length; }
+
+  function syncComposer() {
+    var n = charCount(input.value);
+    var over = n > MAX_TEXT;
+    ccount.textContent = (n > MAX_TEXT - 150) ? (n + " / " + MAX_TEXT) : "";
+    ccount.classList.toggle("over", over);
+
+    var uploading = state.drafts.some(function (d) { return d.uploading; });
+    var hasBody = input.value.trim().length > 0 ||
+      state.drafts.some(function (d) { return d.url; });
+    sendBtn.disabled = state.sending || uploading || over || !hasBody || !state.active;
+    attachBtn.disabled = state.sending || !state.active || !!state.editing;
+
+    input.placeholder = state.editing ? "Edit your message" : "Message";
+    if (!cnote.classList.contains("cerr")) {
+      cnote.textContent = state.connected === false
+        ? "You're offline — messages will fail to send until the connection is back."
+        : "";
+    }
+  }
+
+  function startReply(m) {
+    cancelEdit();
+    state.reply = {
+      id: String(m.id),
+      userId: m.user_id == null ? null : String(m.user_id),
+      name: m.name || "Someone",
+      text: m.text || (isDeleted(m) ? "Deleted message" : "Attachment")
+    };
+    ctxTitle.textContent = "Replying to " + state.reply.name;
+    ctxText.textContent = String(state.reply.text).replace(/\s+/g, " ");
+    ctxEl.classList.add("show");
+    setError("");
+    input.focus();
+    syncComposer();
+  }
+
+  function cancelReply() {
+    state.reply = null;
+    if (!state.editing) ctxEl.classList.remove("show");
+  }
+
+  function startEdit(m) {
+    cancelReply();
+    state.editing = { id: String(m.id), original: m.text == null ? "" : String(m.text) };
+    ctxTitle.textContent = "Editing your message";
+    ctxText.textContent = state.editing.original.replace(/\s+/g, " ") || "(no text)";
+    ctxEl.classList.add("show");
+    input.value = state.editing.original;
+    autoGrow();
+    setError("");
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    syncComposer();
+  }
+
+  function cancelEdit() {
+    if (state.editing) input.value = "";
+    state.editing = null;
+    ctxEl.classList.remove("show");
+    autoGrow();
+    syncComposer();
+  }
+
+  function clearDrafts() {
+    state.drafts = [];
+    draftsEl.textContent = "";
+    syncComposer();
+  }
+
+  function renderDrafts() {
+    draftsEl.textContent = "";
+    state.drafts.forEach(function (d, i) {
+      var box = el("div", "draft-att");
+      var img = document.createElement("img");
+      img.src = d.dataUrl;
+      img.alt = "Image to send";
+      box.appendChild(img);
+      box.appendChild(withIcon(btn("ctx-x", "Remove", function () {
+        state.drafts.splice(i, 1);
+        renderDrafts();
+      }), "x"));
+      if (d.uploading) box.appendChild(el("div", "up", "Uploading…"));
+      else if (d.error) box.appendChild(el("div", "up", "Failed"));
+      draftsEl.appendChild(box);
+    });
+    syncComposer();
+  }
+
+  function readAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(new Error("couldn't read the file")); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  function readAsBytes(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(new Uint8Array(r.result)); };
+      r.onerror = function () { reject(new Error("couldn't read the file")); };
+      r.readAsArrayBuffer(file);
+    });
+  }
+
+  async function attachFiles(files) {
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      if (!file || !/^image\//i.test(file.type || "")) {
+        setError("Only images can be attached.");
+        continue;
+      }
+      var draft = { url: null, dataUrl: "", uploading: true, error: null };
+      state.drafts.push(draft);
+      try {
+        draft.dataUrl = await readAsDataUrl(file);
+        renderDrafts();
+        var bytes = await readAsBytes(file);
+        // `Vec<u8>` over the IPC bridge: a plain array of numbers is what serde
+        // accepts on every Tauri version this app has shipped against.
+        var url = await write("client_upload_image", {
+          bytes: Array.prototype.slice.call(bytes),
+          mime: file.type
+        });
+        draft.url = String(url);
+        draft.uploading = false;
+        // Sent images are not in the media cache until the next sync fetches
+        // them; the local copy stands in so the bubble is not a placeholder.
+        state.localPreview.set(draft.url, draft.dataUrl);
+        setError("");
+      } catch (e) {
+        draft.uploading = false;
+        draft.error = true;
+        setError(e && e.message ? e.message : "The image couldn't be uploaded.");
+      }
+      renderDrafts();
+    }
+  }
+
+  async function doSend() {
+    if (state.sending || !state.active) return;
+    if (state.editing) return doEditSubmit();
+
+    var text = input.value;
+    var atts = state.drafts.filter(function (d) { return d.url; })
+      .map(function (d) { return { type: "image", url: d.url }; });
+    if (!text.trim() && !atts.length) return;
+    if (charCount(text) > MAX_TEXT) {
+      setError("That's " + charCount(text) + " characters and GroupMe accepts about " + MAX_TEXT + ".");
+      return;
+    }
+
+    var cid = state.active;
+    var reply = state.reply;
+    var keptText = text, keptDrafts = state.drafts.slice();
+
+    // Optimistic row. Its id is deliberately not id-shaped: nothing compares it
+    // against a real GroupMe id, and it is replaced by the server's copy — the
+    // `source_guid` echo is what makes that match reliable on the Rust side.
+    var localId = "local:" + (++localSeq);
+    var optimistic = {
+      id: localId,
+      __local: true,
+      __pending: true,
+      user_id: state.selfId,
+      name: state.accountName || "You",
+      text: text,
+      created_at: nowSecs(),
+      system: false,
+      attachments: atts.slice(),
+      reactions: [],
+      favorited_by: []
+    };
+    if (reply) {
+      optimistic.attachments.push({ type: "reply", reply_id: reply.id, base_reply_id: reply.id,
+        user_id: reply.userId || undefined });
+    }
+
+    state.sending = true;
+    input.value = "";
+    autoGrow();
+    clearDrafts();
+    cancelReply();
+    setError("");
+    syncComposer();
+    appendLive(optimistic);
+    scrollToBottom();
+
+    var args = {
+      conversationId: cid,
+      kind: state.activeKind,
+      text: text,
+      attachments: atts.length ? atts : null,
+      replyTo: reply ? reply.id : null,
+      replyToUserId: reply ? reply.userId : null
+    };
+
+    try {
+      var sent = await write("client_send_message", args);
+      state.sending = false;
+      if (sent && sent.user_id != null) rememberSelf(String(sent.user_id));
+      if (state.active === cid && sent) {
+        replaceMessage(sent, localId);
+        touchConversation(cid, sent.text || (atts.length ? "sent a photo" : ""), Number(sent.created_at) || nowSecs());
+        state.readAt[cid] = convoStamp(state.byId[cid] || {});
+        saveReadAt();
+      }
+      syncComposer();
+    } catch (e) {
+      state.sending = false;
+      // Nothing is lost and nothing is silently dropped: the optimistic row
+      // goes away, the text and attachments come back, and the reason is
+      // printed under the box where the retry lives.
+      if (state.active === cid) removeMessage(localId);
+      input.value = keptText;
+      state.drafts = keptDrafts;
+      renderDrafts();
+      autoGrow();
+      if (reply) startReply({ id: reply.id, user_id: reply.userId, name: reply.name, text: reply.text });
+      setError((e && e.message ? e.message : "The message couldn't be sent") + " — press send to try again.");
+      syncComposer();
+    }
+  }
+
+  async function doEditSubmit() {
+    var editing = state.editing;
+    if (!editing) return;
+    var text = input.value;
+    if (!text.trim()) { setError("An edited message can't be empty. Delete it instead."); return; }
+    if (charCount(text) > MAX_TEXT) {
+      setError("That's " + charCount(text) + " characters and GroupMe accepts about " + MAX_TEXT + ".");
+      return;
+    }
+    if (state.activeKind !== "group") {
+      setError("GroupMe doesn't support editing direct messages.");
+      return;
+    }
+    state.sending = true;
+    syncComposer();
+    try {
+      var updated = await write("client_edit_message", {
+        groupId: state.active, messageId: editing.id, text: text
+      });
+      state.sending = false;
+      cancelEdit();
+      if (updated) replaceMessage(updated);
+      setError("");
+      toast("Message edited");
+    } catch (e) {
+      state.sending = false;
+      setError(e && e.message ? e.message : "The edit couldn't be saved.");
+      syncComposer();
+    }
+  }
+
+  async function doDelete(m) {
+    var cid = state.active;
+    try {
+      await write("client_delete_message", { conversationId: cid, messageId: String(m.id) });
+      m.deleted_at = nowSecs();
+      replaceMessage(m);
+      toast("Message deleted");
+    } catch (e) {
+      toast(e && e.message ? e.message : "The message couldn't be deleted.", true);
+    }
+  }
+
+  async function doReact(m, code) {
+    try {
+      var reactions = await write("client_react", {
+        conversationId: state.active, messageId: String(m.id), code: code == null ? null : String(code)
+      });
+      if (Array.isArray(reactions)) m.reactions = reactions;
+      else if (code == null && state.selfId) {
+        var favs = Array.isArray(m.favorited_by) ? m.favorited_by.slice() : [];
+        if (favs.indexOf(state.selfId) < 0) favs.push(state.selfId);
+        m.favorited_by = favs;
+      }
+      replaceMessage(m);
+    } catch (e) {
+      toast(e && e.message ? e.message : "The reaction couldn't be added.", true);
+    }
+  }
+
+  async function doUnreact(m) {
+    try {
+      var reactions = await write("client_unreact", {
+        conversationId: state.active, messageId: String(m.id)
+      });
+      if (Array.isArray(reactions)) m.reactions = reactions;
+      if (state.selfId && Array.isArray(m.favorited_by)) {
+        m.favorited_by = m.favorited_by.filter(function (u) { return String(u) !== state.selfId; });
+      }
+      replaceMessage(m);
+    } catch (e) {
+      toast(e && e.message ? e.message : "The reaction couldn't be removed.", true);
+    }
+  }
+
+  /* ============================= popovers =============================== */
+
+  var scrim = $("scrim"), emojiPop = $("emojiPop"), menuPop = $("menuPop");
+
+  function closePops() {
+    emojiPop.classList.remove("show");
+    menuPop.classList.remove("show");
+    scrim.classList.remove("show");
+  }
+
+  function placePop(pop, anchor) {
+    pop.classList.add("show");
+    scrim.classList.add("show");
+    var a = anchor.getBoundingClientRect();
+    var w = pop.offsetWidth, h = pop.offsetHeight;
+    var left = Math.min(Math.max(8, a.left), window.innerWidth - w - 8);
+    var top = a.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, a.top - h - 6);
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+  }
+
+  function openEmojiPicker(anchor, m) {
+    emojiPop.textContent = "";
+    REACTIONS.forEach(function (code) {
+      var b = el("button", null, code);
+      b.type = "button";
+      b.setAttribute("aria-label", "React with " + code);
+      b.addEventListener("click", function () { closePops(); doReact(m, code); });
+      emojiPop.appendChild(b);
+    });
+    var like = el("button", null, "👌");
+    like.type = "button";
+    like.title = "Plain like";
+    like.setAttribute("aria-label", "Like");
+    like.addEventListener("click", function () { closePops(); doReact(m, null); });
+    emojiPop.appendChild(like);
+    placePop(emojiPop, anchor);
+  }
+
+  function menuItem(label, iconName, onClick, danger) {
+    var b = el("button", danger ? "danger" : null);
+    b.type = "button";
+    b.appendChild(icon(iconName));
+    b.appendChild(el("span", null, label));
+    b.addEventListener("click", function () { closePops(); onClick(); });
+    return b;
+  }
+
+  function openMessageMenu(anchor, m) {
+    menuPop.textContent = "";
+    menuPop.appendChild(menuItem("Reply", "reply", function () { startReply(m); }));
+    if (m.text) menuPop.appendChild(menuItem("Copy text", "copy", function () { copyText(String(m.text)); }));
+
+    var own = canActOn(m) && !isDeleted(m) && !m.__local;
+    if (own && state.activeKind === "group") {
+      menuPop.appendChild(menuItem("Edit", "edit", function () { startEdit(m); }));
+    }
+    if (own) {
+      menuPop.appendChild(document.createElement("hr"));
+      menuPop.appendChild(menuItem("Delete", "trash", function () { confirmDelete(m); }, true));
+    }
+    placePop(menuPop, anchor);
+  }
+
+  // Two-step rather than a modal: the second click is the confirmation, and it
+  // cannot be reached by the same reflex that opened the menu.
+  function confirmDelete(m) {
+    showBanner("Delete this message for everyone? This can't be undone.", "Delete", function () {
+      showBanner(null);
+      doDelete(m);
+    });
+  }
+
+  function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { toast("Copied"); },
+          function () { toast("Couldn't copy", true); });
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    toast("Copying isn't available here", true);
+  }
+
+  /* ============================== search ================================
+     The reason this client exists. FTS5 over every archived message, with the
+     match highlighted and a jump straight into the conversation at that
+     point — which the web app cannot do at all.                            */
+
+  var qEl = $("q"), searchWrap = $("searchWrap");
+  var searchTimer = null, searchSeq = 0;
+
+  function searchActive() { return qEl.value.trim().length > 0; }
+
+  function snippet(text, q) {
+    var t = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    if (!q) return t.slice(0, 200);
+    var i = t.toLowerCase().indexOf(q.toLowerCase());
+    if (i < 0) return t.slice(0, 200);
+    var start = Math.max(0, i - 50);
+    var end = Math.min(t.length, start + 200);
+    return (start > 0 ? "…" : "") + t.slice(start, end) + (end < t.length ? "…" : "");
+  }
+
+  // Highlighting builds text nodes and <mark> elements. The matched text is
+  // still untrusted, so it is set with textContent like everything else.
+  function highlightInto(node, text, q) {
+    var t = String(text == null ? "" : text);
+    var needle = String(q || "").toLowerCase();
+    if (!needle) { node.appendChild(document.createTextNode(t)); return node; }
+    var lower = t.toLowerCase(), pos = 0;
+    for (;;) {
+      var i = lower.indexOf(needle, pos);
+      if (i < 0) break;
+      if (i > pos) node.appendChild(document.createTextNode(t.slice(pos, i)));
+      var mk = document.createElement("mark");
+      mk.textContent = t.slice(i, i + needle.length);
+      node.appendChild(mk);
+      pos = i + needle.length;
+    }
+    node.appendChild(document.createTextNode(t.slice(pos)));
+    return node;
+  }
+
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    var q = qEl.value.trim();
+    if (!q) { searchWrap.classList.remove("busy"); renderConversations(); return; }
+    searchWrap.classList.add("busy");
+    searchTimer = setTimeout(function () { runSearch(q); }, 220);
+  }
+
+  async function runSearch(q) {
+    var mine = ++searchSeq;
+    var hits = await call("archive_search", { query: q, limit: 100 });
+    if (mine !== searchSeq || qEl.value.trim() !== q) return;
+    renderSearchResults(Array.isArray(hits) ? hits : [], q);
+  }
+
+  function renderSearchResults(hits, query) {
+    listEl.textContent = "";
+    var label = el("div", "list-label",
+      hits.length ? (hits.length === 100 ? "First 100 results" : hits.length + (hits.length === 1 ? " result" : " results")) : "No results");
+    listEl.appendChild(label);
+
+    if (!hits.length) {
+      listEl.appendChild(el("div", "side-empty", "Nothing in the archive matches that."));
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+    hits.forEach(function (h) {
+      var cid = fld(h, "conversation_id", "conversationId");
+      var mid = fld(h, "message_id", "messageId");
+      var cname = fld(h, "conversation_name", "conversationName") ||
+        (cid != null && state.byId[cid] && state.byId[cid].name) || "Conversation";
+      var sender = fld(h, "sender_name", "senderName") || "Someone";
+      var when = fld(h, "created_at", "createdAt");
+
+      var row = el("button", "row");
+      row.type = "button";
+      row.setAttribute("role", "listitem");
+      row.appendChild(makeAvatar(sender, null, sender, "sm"));
+
+      var body = el("div", "row-body");
+      var top = el("div", "row-top");
+      top.appendChild(el("div", "row-name", cname));
+      top.appendChild(el("div", "row-time", relTime(when)));
+      body.appendChild(top);
+      body.appendChild(el("div", "row-prev", sender));
+      body.appendChild(highlightInto(el("div", "hit-text"), snippet(h.text, query), query));
+      row.appendChild(body);
+
+      row.addEventListener("click", function () {
+        if (cid == null) return;
+        // Ids stay strings the whole way through: query -> hit -> cursor.
+        if (String(cid) === String(state.active) && mid != null) goToMessage(String(mid), String(cid));
+        else openConversation(String(cid), mid == null ? null : String(mid));
+      });
+      frag.appendChild(row);
+    });
+    listEl.appendChild(frag);
+  }
+
+  function clearSearch() {
+    qEl.value = "";
+    clearTimeout(searchTimer);
+    searchSeq++;
+    searchWrap.classList.remove("busy");
+    renderConversations();
+  }
+
+  /* ============================== realtime =============================== */
+
+  function setConn(connected, label) {
+    state.connected = connected;
+    var pill = $("conn");
+    pill.classList.toggle("live", connected === true);
+    pill.classList.toggle("down", connected === false);
+    $("connText").textContent = label || (connected ? "Live" : "Offline");
+    pill.title = connected
+      ? "Connected — new messages arrive as they are sent"
+      : "Not connected — you can read everything, but sending will fail";
+    syncComposer();
+  }
+
+  function onRealtimeMessage(evt) {
+    var a = adaptMessage(evt);
+    if (!a) return;
+    var stamp = Number(fld(a.msg, "created_at", "createdAt")) || nowSecs();
+    var preview = a.msg.text || (Array.isArray(a.msg.attachments) && a.msg.attachments.length ? "sent an attachment" : "");
+
+    if (a.cid === state.active && !state.anchored) {
+      var wasAtBottom = state.atBottom;
+      appendLive(a.msg);
+      touchConversation(a.cid, preview, stamp);
+      if (wasAtBottom) { scrollToBottom(); markRead(a.cid); }
+      else showBanner("New messages below.", "Jump to latest", function () {
+        showBanner(null); scrollToBottom(); markRead(a.cid);
+      });
+      return;
+    }
+    touchConversation(a.cid, preview, stamp);
+  }
+
+  function onRealtimeReaction(evt) {
+    var a = adaptReaction(evt);
+    if (!a) return;
+    if (a.cid !== state.active) return;
+    var m = state.msgById.get(a.mid);
+    if (!m) return;
+    m.reactions = a.reactions;
+    replaceMessage(m);
+  }
+
+  function onRealtimeTyping(evt) {
+    var a = adaptTyping(evt);
+    if (!a) return;
+    var m = state.typing.get(a.cid);
+    if (!m) { m = new Map(); state.typing.set(a.cid, m); }
+    m.set(a.uid, { name: a.name, until: a.until });
+    if (a.cid === state.active) updateSub();
+  }
+
+  function onRealtimeState(evt) {
+    var a = adaptState(evt);
+    if (!a) return;
+    setConn(a.connected, a.label);
+  }
+
+  async function subscribe() {
+    if (!HAS_EVENTS) return;
+    var pairs = [
+      ["realtime://message", onRealtimeMessage],
+      ["realtime://reaction", onRealtimeReaction],
+      ["realtime://typing", onRealtimeTyping],
+      ["realtime://state", onRealtimeState],
+      // Emitted by the existing sync loop; the conversation list and the
+      // footer counters are stale until it fires.
+      ["archive://synced", onSynced]
+    ];
+    for (var i = 0; i < pairs.length; i++) {
+      try {
+        await TAURI.event.listen(pairs[i][0], pairs[i][1]);
+      } catch (e) {
+        console.warn("could not subscribe to " + pairs[i][0], e);
+      }
+    }
+  }
+
+  var syncedTimer = null;
+  function onSynced() {
+    // A burst of sync events must not turn into a burst of full list rebuilds.
+    clearTimeout(syncedTimer);
+    syncedTimer = setTimeout(async function () {
+      await loadStats();
+      var n = await loadConversations();
+      if (n && !state.active) showIdleEmpty();
+    }, 400);
+  }
+
+  /* ============================ empty states ============================ */
+
+  function showIdleEmpty() {
+    $("emptySpin").textContent = "";
+    $("emptyTitle").textContent = "Pick a conversation";
+    $("emptyText").textContent =
+      "Everything is read from the copy of your history kept on this computer, so it opens instantly and every message is searchable.";
+    $("emptyFine").textContent = "Press / to search, Esc to clear.";
+  }
+
+  function showSyncingEmpty(hasAccount) {
+    $("emptyTitle").textContent = hasAccount ? "Downloading your history" : "Waiting for sign-in";
+    $("emptyText").textContent = hasAccount
+      ? "The first sync is still running. Conversations appear here as they arrive, newest first."
+      : "Open GroupMe once so the app can pick up the session, and your conversations will start downloading.";
+    $("emptyFine").textContent = "This window stays usable while it runs.";
+    $("emptySpin").textContent = "";
+    $("emptySpin").appendChild(el("div", "spinner"));
+  }
+
+  /* ============================== wiring ================================ */
+
+  $("brandMark").appendChild(icon("logo"));
+  $("emptyMark").appendChild(icon("logo"));
+  $("back").appendChild(icon("back"));
+  $("toLatest").appendChild(icon("jump"));
+  $("ctxX").appendChild(icon("x"));
+  attachBtn.appendChild(icon("image"));
+  sendBtn.appendChild(icon("send"));
+  searchWrap.insertBefore(icon("search"), searchWrap.firstChild);
+
+  qEl.addEventListener("input", onSearchInput);
+
+  scroller.addEventListener("scroll", function () {
+    if (scroller.scrollTop < 400) loadOlder();
+    state.atBottom = (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) < 80;
+    if (state.atBottom && bannerEl.classList.contains("show") && !state.anchored) showBanner(null);
+  }, { passive: true });
+
+  $("back").addEventListener("click", function () { app.classList.remove("thread-open"); });
+
+  $("toLatest").addEventListener("click", function () {
+    if (state.anchored && state.active) openConversation(state.active);
+    else { scrollToBottom(); if (state.active) markRead(state.active); }
+  });
+
+  $("ctxX").addEventListener("click", function () {
+    if (state.editing) cancelEdit(); else { cancelReply(); syncComposer(); }
+  });
+
+  sendBtn.addEventListener("click", doSend);
+  attachBtn.addEventListener("click", function () { fileEl.click(); });
+  fileEl.addEventListener("change", function () {
+    var files = fileEl.files;
+    if (files && files.length) attachFiles(files);
+    fileEl.value = "";
+  });
+
+  input.addEventListener("input", function () { autoGrow(); if (cnote.classList.contains("cerr")) setError(""); syncComposer(); });
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey) { e.preventDefault(); doSend(); return; }
+    if (e.key === "Escape") {
+      if (state.editing) { cancelEdit(); e.stopPropagation(); }
+      else if (state.reply) { cancelReply(); syncComposer(); e.stopPropagation(); }
+    }
+  });
+
+  // Dropping an image on the thread attaches it rather than navigating the
+  // webview to a file:// URL, which is what the default handler would do.
+  ["dragenter", "dragover"].forEach(function (evt) {
+    threadEl.addEventListener(evt, function (e) { e.preventDefault(); });
+  });
+  threadEl.addEventListener("drop", function (e) {
+    e.preventDefault();
+    if (!state.active) return;
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) attachFiles(files);
+  });
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) { e.preventDefault(); });
+
+  scrim.addEventListener("click", closePops);
+  window.addEventListener("resize", closePops);
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if (emojiPop.classList.contains("show") || menuPop.classList.contains("show")) { closePops(); return; }
+      if (bannerEl.classList.contains("show")) { showBanner(null); return; }
+      if (qEl.value) { clearSearch(); qEl.blur(); }
+      return;
+    }
+    var typingInField = document.activeElement === qEl || document.activeElement === input;
+    if (e.key === "/" && !typingInField) { e.preventDefault(); qEl.focus(); qEl.select(); }
+    if ((e.key === "f" || e.key === "F") && (e.ctrlKey || e.metaKey)) { e.preventDefault(); qEl.focus(); qEl.select(); }
+  });
+
+  // Fallback only. `realtime://state` is authoritative when it arrives; these
+  // two events at least keep the pill honest if it never does.
+  window.addEventListener("online", function () { if (state.connected === null) setConn(true, "Live"); });
+  window.addEventListener("offline", function () { setConn(false, "Offline"); });
+
+  /* =============================== boot ================================= */
+
+  /* The other half of the surface toggle. The injected button on
+     web.groupme.com brings the user here; this one takes them back. Both
+     record the choice, so the router reopens whichever surface was used
+     last. Preference first, then navigate — best-effort, since losing the
+     preference only costs one extra click next launch. */
+  document.getElementById("uiswap").addEventListener("click", async function () {
+    await call("client_set_ui_preference", { ui: "web" });
+    location.replace("https://web.groupme.com");
+  });
+
+  (async function boot() {
+    loadReadAt();
+    autoGrow();
+    setConn(HAS_IPC ? (navigator.onLine ? null : false) : null, HAS_IPC ? "Connecting" : "Preview");
+    if (!HAS_IPC) state.connected = null;
+
+    // Arriving here IS the preference — however the user got here, the last
+    // surface used is the one the router should reopen next launch.
+    if (HAS_IPC) {
+      call("client_set_ui_preference", { ui: "client" });
+    }
+
+    var stats = await loadStats();
+    var count = await loadConversations();
+
+    if (!count) showSyncingEmpty(!!(stats && fld(stats, "account_name", "accountName")));
+    else showIdleEmpty();
+
+    await subscribe();
+    syncComposer();
+  })();
+
+})();
+</script>
+
