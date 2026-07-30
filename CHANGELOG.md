@@ -2,6 +2,69 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.4.0] — 2026-07-29
+
+A design pass over every surface, and the unread indicator finally tells the
+truth.
+
+### Fixed
+
+- **Conversations you had already read still showed as unread.** The archive held
+  no read state at all, so the client could only compare each conversation
+  against the last time *that window* had opened it — recorded in localStorage,
+  empty on a fresh window, so everything with any message read as unread forever.
+  GroupMe sends `unread_count`, `last_read_message_id` and `last_read_at` on both
+  list endpoints and nothing parsed them. Now stored (schema v2) and preferred by
+  the UI in three tiers: the server count, else the last-read id compared against
+  the newest known id as digit strings, else the old local behaviour.
+
+  Two details that are wrong in their obvious form: the fields are `Option`, not
+  defaulted to `0`, because "absent" and "zero unread" are different claims and
+  reading a missing count as *all read* would hide genuinely unread
+  conversations; and the upserts `COALESCE` rather than overwrite, because
+  `GET /v3/groups` omits read state on most groups (200 of 211 in the capture)
+  and a list sync would otherwise erase what a single-group fetch established.
+
+  Mark-read now also fires when the server said unread but the local timestamp
+  had not moved — exactly the case the old rule got wrong.
+- Failed page resources log at `debug` rather than `warn`. GroupMe's attachment
+  URLs redirect to expiring signed CDN links, so an avatar that 403s is
+  documented behaviour, one per avatar on screen — the same log flooding the
+  0.3.0 level filtering exists to prevent.
+
+### Changed
+
+- **Every surface redesigned.** The app no longer imitates GroupMe. The direction
+  is the archive's own: a research instrument, or a well-set periodical. Warm
+  paper in light, deep ink in dark, one vermilion accent used sparingly, hairline
+  rules instead of filled boxes, and typography carrying hierarchy rather than
+  weight and colour.
+  - **The client is a transcript, not a bubble feed** — one continuous column
+    with bylines, so replies read as quotations, reactions as marginalia and
+    system events as clearly secondary. It also holds up better at 142,000
+    messages than alternating alignment. Own messages take an accent rule in the
+    margin. Search reads as an index: numbered entries, conversation in display
+    serif, sender as a tracked attribution.
+  - **The offline reader** loses its disabled composer entirely. A dead input box
+    that mimes sending is a worse promise than a stated one, so the thread ends
+    in a colophon — which also means no input element exists on that surface at
+    all, tightening the read-only boundary rather than decorating it. Being
+    offline is styled as the archive working correctly, not as a fault.
+  - **Router, sync status and updater** read as printed artifacts rather than
+    dialogs. Level is carried by a marginal rule and the wording, never an
+    alarmed panel, so colour is never the only signal. The generic spinners are
+    gone.
+  - Fonts ship with Windows 10/11 — Sitka Heading, Corbel, Bahnschrift, Cascadia
+    Mono. Nothing is fetched: the CSP forbids it and `index.html` has to render
+    in exactly the case where the network is down.
+  - Contrast was computed, not eyeballed, and it changed the design: accent on
+    accent-soft is only 4.35:1 in dark, so accent became a rule on those fills;
+    the avatar palette is eight muted earth tones, each ≥5.9:1 against its
+    initials.
+
+`index.html`'s script block is byte-identical to the previous release, so every
+routing decision is unchanged by construction rather than by inspection.
+
 ## [0.3.0] — 2026-07-29
 
 ### Fixed
