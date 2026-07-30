@@ -889,4 +889,56 @@ mod tests {
         );
         assert!(u.as_str().contains(OFFLINE_PAGE));
     }
+
+    /// Guards a whole-app outage that neither `node --check` nor JS linting
+    /// catches, because it is an HTML rule, not a JS one: the parser ends a
+    /// `<script>` element at the first `</script>` sequence *anywhere* in its
+    /// content, including inside a JS comment or string. One such sequence in a
+    /// comment truncated `client.html` a third of the way through, so `boot()`
+    /// never ran and the window sat forever on "opening the local archive" over
+    /// a fully populated archive. It cost a live debugging session precisely
+    /// because every JS-level check passed.
+    ///
+    /// So: between each page's first `<script>` and its last `</script>`, no
+    /// other `</script` may appear. A comment that must mention the tag has to
+    /// break the sequence (say "a script tag", not the literal).
+    #[test]
+    fn no_frontend_script_is_truncated_by_an_embedded_closing_tag() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend");
+        for page in [
+            "index.html",
+            "client.html",
+            "offline.html",
+            "status.html",
+            "update.html",
+        ] {
+            let html = std::fs::read_to_string(format!("{dir}/{page}"))
+                .unwrap_or_else(|e| panic!("reading {page}: {e}"));
+            let lower = html.to_ascii_lowercase();
+            let Some(open) = lower.find("<script>") else {
+                continue;
+            };
+            let body_start = open + "<script>".len();
+            let last_close = lower
+                .rfind("</script")
+                .expect("a page with <script> must close it");
+            assert!(
+                last_close >= body_start,
+                "{page}: malformed script tags"
+            );
+            let inner = &lower[body_start..last_close];
+            assert!(
+                !inner.contains("</script"),
+                "{page}: a `</script` appears inside the script body and will \
+                 truncate the whole file in a browser — break the sequence in \
+                 that comment/string"
+            );
+            // The opening tag must be attribute-free `<script>`, since the
+            // check keys on that exact form; a bare guard against drift.
+            assert!(
+                !lower[..open].contains("<script "),
+                "{page}: unexpected <script ...> with attributes before the main block"
+            );
+        }
+    }
 }

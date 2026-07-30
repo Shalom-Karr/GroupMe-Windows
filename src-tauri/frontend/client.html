@@ -23,6 +23,28 @@
   `document.createTextNode`. The only markup written as a string in this file is
   the static icon set below, which contains no interpolation at all.
 
+  That constraint is load-bearing for the markdown renderer in particular.
+  Message bodies are parsed for **bold**, *italic*, `code`, fenced blocks,
+  > quotations, lists and links — and the output is assembled node by node with
+  `createElement` and `createTextNode`, never by building a string and handing
+  it to a parser. A message body therefore cannot express an element at all,
+  whatever it contains, so a script tag in a message arrives as literal
+  visible characters. Anchors are the one place where untrusted text influences
+  an attribute, and their `href` is rebuilt from a scheme-checked match, so
+  `javascript:` and `data:` cannot reach one. See `renderRich`.
+
+  Link previews are rendered here and fetched in Rust. `linkPreviewSource` is
+  the single adapter; the page never requests a URL itself, both because
+  `default-src 'self'` blocks it and because doing so would tell a third party
+  what the user is reading.
+
+  CONNECTIVITY OUTRANKS THE SOCKET. `realtime://state` describes the websocket,
+  and its `unauthorized` status is latched — the Rust worker stops for good on a
+  refused token, so that value outlives the condition and a later network drop
+  would still have read "unauthorized" in the header. The pill therefore
+  consults the socket only when the app is online; `archive://connectivity` and
+  `navigator.onLine` decide that, either one being enough. See `paintConn`.
+
   MESSAGE IDS ARE STRINGS, ALWAYS. GroupMe ids run to ~1.78e17, past
   Number.MAX_SAFE_INTEGER where a double's ulp is 32. `Number(id)` silently
   rounds, and a rounded cursor either repeats the boundary message forever or
@@ -146,7 +168,8 @@
   /* Small tracked uppercase metadata: timestamps, section heads, counts. */
   .label, .list-label, .pill, .uiswap, .thread-sub, .msg-time, .row-time,
   .day span, .top-note, .side-foot, .ctx-title, .composer-foot .count, .edited,
-  .react, .hit-when, .hit-who, .hit-jump, .empty-kicker, .up {
+  .react, .hit-when, .hit-who, .hit-jump, .empty-kicker, .up,
+  .composer-foot .hint, .lp-site {
     font-family: var(--font-label);
     letter-spacing: .1em;
     text-transform: uppercase;
@@ -179,6 +202,9 @@
   .brand-name {
     font-family: var(--font-display); font-size: 1.02rem; font-weight: 600;
     letter-spacing: .005em; line-height: 1;
+    /* Yields before the status pill does, so a longer status never pushes the
+       UI toggle off the edge of a 292 px sidebar. */
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .pill {
     margin-left: auto; font-size: .6rem; font-weight: 400;
@@ -191,6 +217,9 @@
   .pill.live .dot { background: var(--ok); }
   .pill.down { color: var(--accent); }
   .pill.down .dot { background: var(--accent); }
+  /* Reachable but dropping requests. Not the same alarm as a hard failure. */
+  .pill.warn { color: var(--warn); }
+  .pill.warn .dot { background: var(--warn); }
 
   .uiswap {
     font-size: .6rem; padding: .28rem .5rem; border-radius: 1px;
@@ -445,6 +474,76 @@
   .bubble.pending { opacity: .5; }
   .edited { font-size: .56rem; color: var(--fg-soft); margin-left: .45rem; font-style: normal; }
 
+  /* ── markdown inside the set text ────────────────────────────────────────
+     Chat, not a document: emphasis, code, quotations and short lists, set to
+     sit inside the reading column without disturbing its rhythm. There are no
+     headings and no tables on purpose. Every node is built by `renderRich`
+     from a tokeniser — never from a string of markup. */
+  .bubble strong { font-weight: 700; }
+  .bubble em { font-style: italic; }
+  .bubble code {
+    font-family: var(--font-mono); font-size: .84em;
+    background: var(--raised); border: 1px solid var(--rule); border-radius: 1px;
+    padding: .04em .28em; overflow-wrap: anywhere;
+  }
+  .bubble pre {
+    margin: .5rem 0; padding: .5rem .7rem; max-width: 100%; overflow-x: auto;
+    background: var(--raised); border: 1px solid var(--rule); border-radius: 1px;
+    border-left: 2px solid var(--rule);
+  }
+  .bubble pre code {
+    display: block; background: none; border: 0; padding: 0;
+    white-space: pre; font-size: .82em; line-height: 1.52; overflow-wrap: normal;
+  }
+  .bubble blockquote {
+    margin: .42rem 0; padding: .04rem 0 .04rem .8rem;
+    border-left: 1px solid var(--rule); color: var(--fg-soft); font-style: italic;
+  }
+  .bubble ul, .bubble ol { margin: .42rem 0; padding-left: 1.3rem; }
+  .bubble ul { list-style: square; }
+  .bubble li { margin: .08rem 0; }
+  .bubble li::marker { color: var(--fg-soft); }
+  .bubble a {
+    color: var(--accent); text-decoration: none;
+    border-bottom: 1px solid var(--accent-soft); overflow-wrap: anywhere;
+  }
+  .bubble a:hover { border-bottom-color: var(--accent); }
+  /* A block already carries its own leading; pre-wrap must not add another. */
+  .bubble > :first-child { margin-top: 0; }
+  .bubble > :last-child { margin-bottom: 0; }
+
+  /* ── link preview ────────────────────────────────────────────────────────
+     A catalogue entry: plate at the left, the site as tracked small caps, the
+     title in the display face, one or two lines of description. Every field is
+     optional and the card is designed to be right with any of them absent —
+     including an image that fails, which removes itself. The data arrives from
+     Rust; this page never fetches a URL. */
+  .lp {
+    display: flex; align-items: stretch; margin-top: .55rem;
+    max-width: 27rem; overflow: hidden;
+    border: 1px solid var(--rule); border-radius: 1px; background: var(--raised);
+    color: inherit; text-decoration: none;
+  }
+  .lp:hover { border-color: var(--accent); background: var(--surface); }
+  .lp.noimg { max-width: 25rem; }
+  .lp-thumb {
+    flex: none; width: 86px; align-self: stretch; min-height: 62px;
+    object-fit: cover; display: block;
+    background: var(--surface); border-right: 1px solid var(--rule);
+  }
+  .lp-body { min-width: 0; flex: 1; padding: .5rem .7rem .55rem; }
+  .lp-site { font-size: .55rem; color: var(--fg-soft); }
+  .lp-title {
+    font-family: var(--font-display); font-size: .88rem; font-weight: 600;
+    line-height: 1.3; margin-top: .1rem; color: var(--fg);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .lp:hover .lp-title { color: var(--accent); }
+  .lp-desc {
+    font-size: .78rem; line-height: 1.45; color: var(--fg-soft); margin-top: .2rem;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
   .msg.mine::before {
     content: ""; position: absolute; left: 0; top: 0; bottom: 0;
     width: 2px; background: var(--accent);
@@ -536,23 +635,48 @@
   .act svg { width: 13px; height: 13px; }
   .act .emo { font-size: .9rem; line-height: 1; }
 
-  /* ---------- composer ---------- */
+  /* ---------- composer ----------
+
+     One field, not a row of controls.
+
+     The reply/edit strip and the attachment tray are *sections of the field*,
+     inside its frame and above the typing line, rather than loose blocks
+     floating over it. Two things follow from that. They read as attached,
+     because they are. And because the whole field is bottom-anchored in a flex
+     column, they grow upward — so the line the cursor is on never moves when a
+     reply is started, a thumbnail arrives or an upload finishes.
+
+     Attach sits at the left of the text, ahead of it in reading order and
+     unfilled. Send sits at the right and is the only filled control on the
+     page: primary by contrast rather than by size.                          */
 
   .composer {
     flex: none; border-top: 1px solid var(--rule);
-    padding: .75rem 1.55rem .9rem; background: var(--surface);
+    padding: .7rem 1.55rem .8rem; background: var(--surface);
   }
   .composer-inner { max-width: var(--measure); margin: 0 auto; }
 
+  .composer-field {
+    border: 1px solid var(--rule); border-radius: 2px; background: var(--bg);
+  }
+  .composer-field:focus-within {
+    border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+
+  /* Reply / edit context. A section of the field, marked in its own margin. */
   .ctx {
-    display: none; align-items: flex-start; gap: .6rem;
-    padding: .45rem .7rem; margin-bottom: .55rem;
-    border-left: 2px solid var(--accent); background: var(--raised);
-    border-radius: 0; font-size: .8rem; color: var(--fg-soft);
+    display: none; align-items: flex-start; gap: .55rem; position: relative;
+    padding: .4rem .5rem .4rem .75rem;
+    border-bottom: 1px solid var(--rule); background: var(--raised);
+    font-size: .8rem; color: var(--fg-soft);
   }
   .ctx.show { display: flex; }
+  .ctx::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 2px; background: var(--accent);
+  }
   .ctx-body { min-width: 0; flex: 1; }
-  .ctx-title { color: var(--accent); font-size: .58rem; margin-bottom: .1rem; }
+  .ctx-title { color: var(--accent); font-size: .56rem; margin-bottom: .06rem; }
   .ctx-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
   .ctx-x {
     flex: none; width: 21px; height: 21px; border: 0; background: none; color: var(--fg-soft);
@@ -561,11 +685,17 @@
   .ctx-x:hover { background: var(--surface); color: var(--accent); }
   .ctx-x svg { width: 12px; height: 12px; }
 
-  .drafts { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .55rem; }
+  /* Attachment tray. Also a section of the field, so thumbnails appearing and
+     disappearing never shift the typing line. */
+  .drafts {
+    display: none; flex-wrap: wrap; gap: .5rem;
+    padding: .5rem .55rem; border-bottom: 1px solid var(--rule);
+  }
+  .drafts.show { display: flex; }
   .draft-att { position: relative; }
   .draft-att img {
     display: block; width: 62px; height: 62px; object-fit: cover;
-    border-radius: 1px; border: 1px solid var(--rule); background: var(--raised); padding: 2px;
+    border-radius: 1px; border: 1px solid var(--rule); background: var(--surface); padding: 2px;
   }
   .draft-att .ctx-x {
     position: absolute; top: -7px; right: -7px; width: 19px; height: 19px;
@@ -574,42 +704,52 @@
   .draft-att .up {
     font-size: .55rem; color: var(--fg-soft); text-align: center; margin-top: .2rem;
   }
+  .draft-att.failed img { border-color: var(--accent); }
+  .draft-att.failed .up { color: var(--accent); }
 
-  .composer-box {
-    display: flex; align-items: flex-end; gap: .45rem;
-    border: 1px solid var(--rule); border-radius: 1px;
-    background: var(--bg); padding: .35rem .4rem .35rem .75rem;
-  }
-  .composer-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .composer-box { display: flex; align-items: flex-end; gap: .3rem; padding: .28rem .3rem; }
+  /* A hairline between the attach control and the text, the same device the
+     rest of the page uses to separate a margin from a column. It grows with
+     the field, so a tall draft reads as one block rather than three controls. */
   .composer-box textarea {
     flex: 1; min-width: 0; font: inherit; font-family: var(--font-ui);
-    font-size: .92rem; line-height: 1.55;
-    border: 0; background: none; color: var(--fg); resize: none;
-    max-height: 8.5rem; padding: .38rem 0; overflow-y: auto;
+    font-size: .95rem; line-height: 1.6; color: var(--fg);
+    border: 0; border-left: 1px solid var(--rule); background: none; resize: none;
+    margin: 0; padding: .4rem .4rem .4rem .7rem;
+    max-height: 176px; overflow-y: auto;
     -webkit-user-select: text; user-select: text;
   }
   .composer-box textarea::placeholder { color: var(--fg-soft); }
   .composer-box textarea:focus { outline: none; }
+  .composer-field:focus-within .composer-box textarea { border-left-color: var(--accent-soft); }
+
   .cbtn {
-    flex: none; width: 29px; height: 29px; border-radius: 1px; margin-bottom: .12rem;
-    border: 1px solid var(--rule); background: none; color: var(--fg-soft);
+    flex: none; width: 30px; height: 30px; border-radius: 2px; margin-bottom: 2px;
+    border: 1px solid transparent; background: none; color: var(--fg-soft);
     display: grid; place-items: center; cursor: pointer; padding: 0;
   }
-  .cbtn:hover:not(:disabled) { color: var(--fg); background: var(--raised); }
-  .cbtn:disabled { opacity: .4; cursor: not-allowed; }
-  .cbtn svg { width: 14px; height: 14px; }
-  .cbtn.go { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+  .cbtn:hover:not(:disabled) { color: var(--fg); background: var(--raised); border-color: var(--rule); }
+  .cbtn:disabled { opacity: .38; cursor: not-allowed; }
+  .cbtn svg { width: 15px; height: 15px; }
+  .cbtn.go {
+    width: 32px; background: var(--accent); border-color: var(--accent); color: var(--bg);
+  }
+  .cbtn.go svg { width: 14px; height: 14px; }
   .cbtn.go:hover:not(:disabled) { background: var(--fg); border-color: var(--fg); color: var(--bg); }
-  .cbtn.go:disabled { background: none; border-color: var(--rule); color: var(--fg-soft); }
+  .cbtn.go:disabled { background: none; border-color: var(--rule); color: var(--fg-soft); opacity: 1; }
 
+  /* Reserved height and a single non-wrapping line, so a hint, a count, an
+     offline notice or an error appearing and disappearing cannot move the
+     field above it by a pixel. */
   .composer-foot {
     display: flex; align-items: baseline; gap: .6rem;
-    margin-top: .5rem; font-size: .74rem; color: var(--fg-soft); min-height: 1.1rem;
+    margin-top: .42rem; min-height: 1.15rem; font-size: .74rem; color: var(--fg-soft);
   }
   .composer-foot .grow {
     flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     line-height: 1.4;
   }
+  .composer-foot .hint { font-size: .55rem; }
   .composer-foot .count { font-size: .58rem; flex: none; }
   .composer-foot .count.over { color: var(--warn); }
   .cerr { color: var(--accent); }
@@ -847,19 +987,26 @@
 
       <div class="composer">
         <div class="composer-inner">
-          <div class="ctx" id="ctx">
-            <div class="ctx-body">
-              <div class="ctx-title" id="ctxTitle"></div>
-              <div class="ctx-text" id="ctxText"></div>
+          <!-- One field. The reply/edit strip and the attachment tray are
+               sections inside its frame, above the typing line, so they read as
+               attached to the box and grow upward instead of nudging it. -->
+          <div class="composer-field">
+            <div class="ctx" id="ctx">
+              <div class="ctx-body">
+                <div class="ctx-title" id="ctxTitle"></div>
+                <div class="ctx-text" id="ctxText"></div>
+              </div>
+              <button class="ctx-x" id="ctxX" type="button" aria-label="Cancel"></button>
             </div>
-            <button class="ctx-x" id="ctxX" type="button" aria-label="Cancel"></button>
-          </div>
-          <div class="drafts" id="drafts"></div>
-          <div class="composer-box">
-            <textarea id="input" rows="1" placeholder="Message" aria-label="Message"
-                      autocomplete="off" spellcheck="true"></textarea>
-            <button class="cbtn" id="attachBtn" type="button" title="Attach an image" aria-label="Attach an image"></button>
-            <button class="cbtn go" id="sendBtn" type="button" title="Send" aria-label="Send"></button>
+            <div class="drafts" id="drafts"></div>
+            <div class="composer-box">
+              <!-- Attach first, at the left, ahead of the text in reading order
+                   and in the tab order. -->
+              <button class="cbtn" id="attachBtn" type="button" title="Attach an image" aria-label="Attach an image"></button>
+              <textarea id="input" rows="1" placeholder="Message" aria-label="Message"
+                        autocomplete="off" spellcheck="true"></textarea>
+              <button class="cbtn go" id="sendBtn" type="button" title="Send" aria-label="Send"></button>
+            </div>
           </div>
           <div class="composer-foot">
             <span class="grow" id="cnote"></span>
@@ -1017,6 +1164,26 @@
       c = t === "connected" || t === "live" || t === "open" || t === "ready";
     }
     return { connected: !!c, label: label == null ? (c ? "Live" : "Offline") : String(label) };
+  }
+
+  /* `archive://connectivity` carries `connectivity::Connectivity`, which serde
+     renders lowercase: "online" | "degraded" | "offline". This is a *different*
+     signal from `realtime://state` — it is the Rust monitor's probe result, not
+     the websocket's opinion — and it is the one that decides whether the app is
+     offline. Anything unrecognised is dropped rather than guessed at. */
+  function adaptConnectivity(raw) {
+    var p = unwrap(raw);
+    if (typeof p === "boolean") return p ? "online" : "offline";
+    if (typeof p === "string") {
+      var s = p.toLowerCase().trim();
+      return (s === "online" || s === "degraded" || s === "offline") ? s : null;
+    }
+    if (!p || typeof p !== "object") return null;
+    var v = fld(p, "state", "status", "connectivity");
+    if (v != null) return adaptConnectivity(String(v));
+    var c = fld(p, "online", "connected", "ok");
+    if (c != null) return c ? "online" : "offline";
+    return null;
   }
 
   /* =============================== ids ==================================
@@ -1180,6 +1347,13 @@
     seq: 0,                 // guards a stale page landing after a switch
     selfId: null,
     accountName: null,
+    // What the header pill resolves from, kept apart on purpose.
+    //   net  — "online" | "degraded" | "offline" from archive://connectivity
+    //   rt   — the realtime socket's last word, which can be latched (see
+    //          paintConn); never painted while the app is offline
+    //   connected — the resolved answer, which is what the composer reads
+    net: null,
+    rt: null,
     connected: null,
     mediaCache: new Map(),
     mediaPending: new Map(),
@@ -1844,6 +2018,532 @@
     return frag;
   }
 
+  /* ========================== rich message text ==========================
+
+     Message bodies are markdown-ish. GroupMe defines no dialect, so this
+     supports what people actually type in a chat window and nothing more:
+     **bold**, *italic*, _italic_, `code`, ```fenced blocks```, > quotations,
+     - lists, 1. lists, [labels](links) and bare http(s) URLs. No headings, no
+     tables, no images, no reference links, no HTML passthrough.
+
+     ── The safety rule ──────────────────────────────────────────────────────
+     Not one node in here is created from a string of markup. No `innerHTML`,
+     no `insertAdjacentHTML`, no `<template>`, no
+     `Range.createContextualFragment`, no `DOMParser`. Elements come from
+     `document.createElement` with a fixed tag name chosen by this file, and
+     every leaf is a `document.createTextNode`. A message body has no way to
+     name an element, so markup in a message is inert text and nothing runs.
+     (An example is not written literally here: an HTML parser ends a script
+     element at the first close-script sequence even inside a JS comment, which
+     truncates this whole file and blanks the app — it did exactly that once.)
+
+     Anchors are the one place untrusted text reaches an attribute. `safeUrl`
+     is the only producer of an `href` in this file: it matches against an
+     anchored `https?://…` pattern, then re-parses with `new URL` and checks
+     the resulting protocol, and returns the *parser's* normalised href rather
+     than the sender's string. `javascript:`, `data:`, `vbscript:`, a bare
+     `//host`, and every mixed-case or whitespace-padded variant of them fail
+     that test, and a rejected link is rendered as the literal characters the
+     sender typed. Anchors carry `rel="noopener noreferrer"` and open through
+     the opener plugin's `target="_blank"` handler, so a link never navigates
+     this window.
+
+     ── The cost rule ────────────────────────────────────────────────────────
+     This runs inside the virtualiser's row builder, on a thread that reaches
+     142,000 messages, so it is one linear pass with no backtracking regex.
+     Every regex here is anchored with a bounded quantifier and applied to a
+     single line. The delimiter search is bounded per opener (MD_PROBES) and
+     abandoned for the whole body once a delimiter is known to have no closer
+     left in the string (`ctx.nc`), which removes the quadratic case that a
+     line of unmatched `*` would otherwise be. Bodies past MD_MAX are not
+     parsed at all — a deliberate, visible degradation to plain text.        */
+
+  var MD_MAX = 40000;   // beyond this a body renders as plain text, unparsed
+  var MD_PROBES = 24;   // closer candidates examined per emphasis opener
+  var MD_DEPTH = 4;     // emphasis nesting depth
+
+  var QUOTE_RE  = /^[ \t]{0,3}>[ \t]?/;
+  var FENCE_RE  = /^[ \t]{0,3}(?:```|~~~)[ \t]*[A-Za-z0-9_+.#-]{0,20}[ \t]*$/;
+  var BULLET_RE = /^[ \t]{0,3}[-+*][ \t]+(.*)$/;
+  var OLIST_RE  = /^[ \t]{0,3}\d{1,9}[.)][ \t]+(.*)$/;
+  var MD_PUNCT  = /[\\`*_{}[\]()#+\-.!>~|]/;
+
+  // The only producer of an href in this file. See the safety rule above.
+  var URL_SHAPE = /^https?:\/\/[^\s<>"'`]{1,2000}$/i;
+  var URL_CHAR  = /[^\s<>"'`]/;
+
+  // A control character can arrive raw or through a decoded escape. A URL that
+  // contains one is not a URL.
+  function hasControl(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 32 || c === 127) return true;
+    }
+    return false;
+  }
+
+  function safeUrl(raw) {
+    var u = String(raw == null ? "" : raw).trim();
+    if (u.charAt(0) === "<" && u.charAt(u.length - 1) === ">") u = u.slice(1, -1).trim();
+    if (!URL_SHAPE.test(u) || hasControl(u)) return null;
+    try {
+      var parsed = new URL(u);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+      if (!parsed.hostname) return null;
+      return parsed.href;
+    } catch (e) { return null; }
+  }
+
+  function hostOf(u) {
+    try { return new URL(u).hostname.replace(/^www\./i, ""); } catch (e) { return ""; }
+  }
+
+  function isWordCode(c) {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+           c === 95 || c >= 128;
+  }
+  function isSpaceCode(c) { return c === 32 || c === 9 || c === 10 || c === 13 || c === 12; }
+
+  // An emphasis span made of nothing but more delimiters is not emphasis, it is
+  // a row of asterisks. Without this rule "****…" builds one <strong> per six
+  // characters rather than rendering as the text it plainly is. Exits on the
+  // first real character, so it costs nothing on ordinary content.
+  function hasSubstance(s, from, to, code) {
+    for (var i = from; i < to; i++) {
+      var c = s.charCodeAt(i);
+      if (c !== code && !isSpaceCode(c)) return true;
+    }
+    return false;
+  }
+  // `limit` matters: measuring the *whole* run of a delimiter is quadratic on a
+  // line of bare asterisks, because every position re-measures the rest of it.
+  // Emphasis only ever needs to know "one or two", so it passes 2. Code spans
+  // genuinely need the true length (```a``` closes on three) and pass nothing,
+  // which is safe because the run is then consumed whole in one step.
+  function runLen(s, i, code, limit) {
+    var stop = limit == null ? s.length : Math.min(s.length, i + limit);
+    var j = i;
+    while (j < stop && s.charCodeAt(j) === code) j++;
+    return j - i;
+  }
+
+  // Characters that can begin a construct. Everything else is consumed in
+  // slices, so ordinary prose costs one `slice` per run rather than per char.
+  var MD_SPECIAL = (function () {
+    var a = [];
+    "*_`[\\hH".split("").forEach(function (c) { a[c.charCodeAt(0)] = 1; });
+    return a;
+  })();
+
+  // Cheap veto: most messages contain no markdown and take the plain path.
+  function looksRich(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c === 42 || c === 95 || c === 96 || c === 62 || c === 91 || c === 92) return true;
+      if (c === 104 && s.charCodeAt(i + 1) === 116 &&
+          s.charCodeAt(i + 2) === 116 && s.charCodeAt(i + 3) === 112) return true;
+      if ((c === 45 || c === 43 || (c >= 48 && c <= 57)) &&
+          (i === 0 || s.charCodeAt(i - 1) === 10)) return true;
+    }
+    return false;
+  }
+
+  // Per-render scratch: the links found (for the preview card) and the memo of
+  // delimiters already proved to have no closer left in the body.
+  function richCtx() { return { urls: [], nc: Object.create(null), inLink: false }; }
+
+  function bulletOf(line) {
+    var m = BULLET_RE.exec(line);
+    if (m) return { ordered: false, text: m[1] };
+    m = OLIST_RE.exec(line);
+    if (m) return { ordered: true, text: m[1] };
+    return null;
+  }
+
+  function anchorFor(href, ctx) {
+    var a = document.createElement("a");
+    a.href = href;                       // href only ever comes from safeUrl
+    a.target = "_blank";                 // the opener plugin sends it to the browser
+    a.rel = "noopener noreferrer";
+    a.title = href;
+    if (ctx && ctx.urls.length < 4 && ctx.urls.indexOf(href) < 0) ctx.urls.push(href);
+    return a;
+  }
+
+  /* The run of characters at `i` that is a usable http(s) URL, or null. One
+     scan: `text` is what the sender typed with trailing sentence punctuation
+     removed, `href` is the parser's normalised form (the only thing that ever
+     becomes an attribute), and `len` is how far the cursor advances. */
+  function urlSpanAt(s, i, n) {
+    // Cheapest possible veto first: every `h` in ordinary prose reaches here, so
+    // the substring below must not be allocated for "the", "right", "which"…
+    var t = s.charCodeAt(i + 1);
+    if (t !== 116 && t !== 84) return null;
+    var head = s.substr(i, 8).toLowerCase();
+    var scheme = head.indexOf("https://") === 0 ? 8 : (head.indexOf("http://") === 0 ? 7 : 0);
+    if (!scheme) return null;
+    // Not a URL if it is the tail of a longer token: "xhttp://", "s://a/http://b".
+    if (i > 0) {
+      var pc = s.charCodeAt(i - 1);
+      if (isWordCode(pc) || pc === 47 || pc === 58 || pc === 46) return null;
+    }
+    var j = i + scheme;
+    while (j < n && URL_CHAR.test(s.charAt(j))) j++;
+    if (j <= i + scheme) return null;
+    var text = trimUrlTail(s.slice(i, j));
+    if (!text) return null;
+    var href = safeUrl(text);
+    return href ? { href: href, text: text, len: text.length } : null;
+  }
+
+  // Trailing sentence punctuation belongs to the sentence, not to the URL, and
+  // a closing paren belongs to the URL only if it balances one inside it.
+  function trimUrlTail(u) {
+    for (;;) {
+      if (!u.length) break;
+      var last = u.charAt(u.length - 1);
+      if (".,;:!?\"'".indexOf(last) >= 0) { u = u.slice(0, -1); continue; }
+      if (last === "]" || last === "}") { u = u.slice(0, -1); continue; }
+      if (last === ")") {
+        var opens = 0, closes = 0;
+        for (var k = 0; k < u.length; k++) {
+          var c = u.charCodeAt(k);
+          if (c === 40) opens++; else if (c === 41) closes++;
+        }
+        if (closes > opens) { u = u.slice(0, -1); continue; }
+      }
+      break;
+    }
+    return u;
+  }
+
+  // `[` … `]` allowing one level of nesting, never across a line, bounded so a
+  // line of open brackets cannot turn the scan quadratic.
+  function matchBracket(s, i, n) {
+    var depth = 0, limit = Math.min(n, i + 512);
+    for (var j = i; j < limit; j++) {
+      var c = s.charCodeAt(j);
+      if (c === 10) return -1;
+      if (c === 91) depth++;
+      else if (c === 93) { depth--; if (depth === 0) return j; }
+    }
+    return -1;
+  }
+
+  function pushText(parent, buf) {
+    if (buf) parent.appendChild(document.createTextNode(buf));
+  }
+
+  function inlineInto(parent, text, depth, ctx) {
+    if (!ctx) ctx = richCtx();
+    var s = String(text), n = s.length, buf = "", i = 0;
+
+    while (i < n) {
+      var code = s.charCodeAt(i);
+
+      // A backslash makes the next punctuation character literal.
+      if (code === 92 && i + 1 < n && MD_PUNCT.test(s.charAt(i + 1))) {
+        buf += s.charAt(i + 1); i += 2; continue;
+      }
+
+      // `code` / ``code`` — contents are literal, so nothing inside is parsed.
+      if (code === 96) {
+        var k = runLen(s, i, 96);
+        var key = "`" + k, found = -1;
+        if (!ctx.nc[key]) {
+          var j = i + k;
+          while (j < n) {
+            if (s.charCodeAt(j) === 96) {
+              var k2 = runLen(s, j, 96);
+              if (k2 === k) { found = j; break; }
+              j += k2;
+            } else j++;
+          }
+          if (found < 0) ctx.nc[key] = 1;
+        }
+        if (found > i + k) {
+          pushText(parent, buf); buf = "";
+          var codeEl = document.createElement("code");
+          codeEl.appendChild(document.createTextNode(s.slice(i + k, found)));
+          parent.appendChild(codeEl);
+          i = found + k;
+          continue;
+        }
+        buf += s.substr(i, k); i += k; continue;
+      }
+
+      // **strong**, *em*, _em_
+      if (code === 42 || code === 95) {
+        var ch = s.charAt(i);
+        var run = runLen(s, i, code, 2);
+        var start = i + run;
+        var open = start < n && !isSpaceCode(s.charCodeAt(start));
+        // `_` opens only at a word boundary, so snake_case_names survive.
+        if (open && code === 95 && i > 0 && isWordCode(s.charCodeAt(i - 1))) open = false;
+        if (open && depth < MD_DEPTH) {
+          var need = run === 2 ? ch + ch : ch;
+          var ekey = ch + run, hit = -1;
+          if (!ctx.nc[ekey]) {
+            var at = start, probes = 0;
+            // Exhausting the probe budget is itself conclusive: 24 candidate
+            // closers rejected in one body means this delimiter is being used
+            // as decoration, not as emphasis, so the form is retired for the
+            // rest of the body. That is what keeps the whole pass linear — a
+            // line of bare asterisks would otherwise re-probe from every one of
+            // them. The degradation is that the run renders as the text it is.
+            ctx.nc[ekey] = 1;
+            while (probes < MD_PROBES) {
+              var p = s.indexOf(need, at);
+              if (p < 0) break;
+              probes++;
+              // A single `*` closer that is really the start of a `**` run
+              // belongs to the bold form, not to this one.
+              if (run === 1 && code === 42 && s.charCodeAt(p + 1) === 42) { at = p + 2; continue; }
+              var afterOk = code === 95 ? !isWordCode(s.charCodeAt(p + need.length)) : true;
+              if (p > start && !isSpaceCode(s.charCodeAt(p - 1)) && afterOk &&
+                  hasSubstance(s, start, p, code)) { hit = p; ctx.nc[ekey] = 0; break; }
+              at = p + need.length;
+            }
+          }
+          if (hit > 0) {
+            pushText(parent, buf); buf = "";
+            var em = document.createElement(run === 2 ? "strong" : "em");
+            inlineInto(em, s.slice(start, hit), depth + 1, ctx);
+            parent.appendChild(em);
+            i = hit + need.length;
+            continue;
+          }
+        }
+        buf += s.substr(i, run); i += run; continue;
+      }
+
+      // [label](https://…)
+      if (code === 91 && !ctx.inLink && !ctx.nc["["]) {
+        // No `]` left in the body means no `[` left in it can open a label.
+        if (s.indexOf("]", i) < 0) { ctx.nc["["] = 1; buf += "["; i += 1; continue; }
+        var close = matchBracket(s, i, n);
+        if (close > 0 && s.charAt(close + 1) === "(") {
+          var end = s.indexOf(")", close + 2);
+          if (end > close + 2 && end - close < 2100) {
+            var href = safeUrl(s.slice(close + 2, end));
+            var label = s.slice(i + 1, close);
+            if (href && label) {
+              pushText(parent, buf); buf = "";
+              var a = anchorFor(href, ctx);
+              var was = ctx.inLink;
+              ctx.inLink = true;                       // no anchor inside an anchor
+              inlineInto(a, label, depth + 1, ctx);
+              ctx.inLink = was;
+              parent.appendChild(a);
+              i = end + 1;
+              continue;
+            }
+          }
+        }
+        buf += "["; i += 1; continue;
+      }
+
+      // Bare http(s) URL.
+      if ((code === 104 || code === 72) && !ctx.inLink) {
+        var span = urlSpanAt(s, i, n);
+        if (span) {
+          pushText(parent, buf); buf = "";
+          var la = anchorFor(span.href, ctx);
+          // The visible text is the sender's URL — as a text node, like
+          // everything else. Only the href comes from safeUrl.
+          la.appendChild(document.createTextNode(span.text));
+          parent.appendChild(la);
+          i += span.len;
+          continue;
+        }
+      }
+
+      // Ordinary text, taken in runs.
+      var q = i + 1;
+      while (q < n && !MD_SPECIAL[s.charCodeAt(q)]) q++;
+      buf += s.slice(i, q);
+      i = q;
+    }
+
+    pushText(parent, buf);
+    return parent;
+  }
+
+  /* Blocks first, then inline within each. A run of ordinary lines is emitted
+     as one text node with its newlines intact, which is exactly what the old
+     plain-text renderer did — `.bubble` is `white-space: pre-wrap`, so nothing
+     about unformatted messages changed. */
+  function renderRich(text, ctx) {
+    var frag = document.createDocumentFragment();
+    var s = String(text == null ? "" : text);
+    if (!s) return frag;
+    if (s.length > MD_MAX || !looksRich(s)) {
+      frag.appendChild(document.createTextNode(s));
+      return frag;
+    }
+    if (!ctx) ctx = richCtx();
+
+    var lines = s.split("\n"), i = 0, plain = [];
+    function flushPlain() {
+      if (!plain.length) return;
+      inlineInto(frag, plain.join("\n"), 0, ctx);
+      plain = [];
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      if (FENCE_RE.test(line)) {
+        flushPlain();
+        var body = [];
+        i++;
+        while (i < lines.length && !FENCE_RE.test(lines[i])) { body.push(lines[i]); i++; }
+        if (i < lines.length) i++;                      // the closing fence
+        var pre = document.createElement("pre");
+        var codeNode = document.createElement("code");
+        codeNode.appendChild(document.createTextNode(body.join("\n")));
+        pre.appendChild(codeNode);
+        frag.appendChild(pre);
+        continue;
+      }
+
+      if (QUOTE_RE.test(line)) {
+        flushPlain();
+        var quoted = [];
+        while (i < lines.length && QUOTE_RE.test(lines[i])) {
+          quoted.push(lines[i].replace(QUOTE_RE, ""));
+          i++;
+        }
+        var bq = document.createElement("blockquote");
+        inlineInto(bq, quoted.join("\n"), 0, ctx);
+        frag.appendChild(bq);
+        continue;
+      }
+
+      var item = bulletOf(line);
+      if (item) {
+        flushPlain();
+        var holder = document.createElement(item.ordered ? "ol" : "ul");
+        while (i < lines.length) {
+          var next = bulletOf(lines[i]);
+          if (!next || next.ordered !== item.ordered) break;
+          var li = document.createElement("li");
+          inlineInto(li, next.text, 0, ctx);
+          holder.appendChild(li);
+          i++;
+        }
+        frag.appendChild(holder);
+        continue;
+      }
+
+      plain.push(line);
+      i++;
+    }
+    flushPlain();
+    return frag;
+  }
+
+  /* ============================ link previews ============================
+
+     THIS IS THE ONLY WIRING POINT. `linkPreviewSource` returns null today,
+     which means "no preview available" and costs a row nothing at all — no
+     promise, no timer, no request. When the Rust command lands, the body
+     becomes exactly:
+
+         return call("client_url_preview", { url: url });
+
+     and nothing else in this file changes. `call` already reports a failed or
+     unregistered invoke as null, so an error degrades to "no card".
+
+     The command is expected to resolve to null, or to
+
+         { url, title, description, image, site }
+
+     where every field but `url` is optional and `image` is a LOCAL cached path
+     or a `data:` URL — never a remote one. This page must not fetch a URL: the
+     CSP is `default-src 'self'`, and a request from here would disclose the
+     user's reading to a third party.                                        */
+
+  function linkPreviewSource(url) {
+    // return call("client_url_preview", { url: url });   ← the entire wire-up
+    void url;
+    return null;
+  }
+
+  function attachLinkPreview(host, url) {
+    var src = linkPreviewSource(url);
+    if (!src) return;                       // the no-preview path allocates nothing
+    Promise.resolve(src).then(function (data) {
+      if (!host.isConnected) return;        // the row was dematerialised meanwhile
+      var card = renderLinkPreview(data);
+      if (card) host.appendChild(card);
+    }, function () { /* no preview is an ordinary outcome, not an error */ });
+  }
+
+  function previewLine(v, cap) {
+    var s = v == null ? "" : String(v).replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    return s.length > cap ? s.slice(0, cap) + "…" : s;
+  }
+
+  /* A preview image is a *local* file that Rust has already cached, resolved
+     the same way every other image in this window is. A remote URL is refused
+     rather than attempted: `img-src` would block it, and a request from here
+     would tell a third party what the user is reading. So would a
+     protocol-relative `//host/x`, which is why that is refused too. */
+  function previewImageSrc(v) {
+    var s = v == null ? "" : String(v).trim();
+    if (!s || hasControl(s) || /[<>"'`]/.test(s) || s.indexOf("//") === 0) return null;
+    if (/^data:image\/(png|jpeg|jpg|gif|webp|bmp);/i.test(s)) return s;
+    if (/^asset:/i.test(s) || s.indexOf("http://asset.localhost") === 0) return s;
+    // A scheme other than a Windows drive letter means it is not a local path.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(s) && !/^[a-z]:[\\/]/i.test(s)) return null;
+    return localSrc(s);
+  }
+
+  function renderLinkPreview(data) {
+    if (!data || typeof data !== "object") return null;
+    var href = safeUrl(fld(data, "url", "href"));
+    if (!href) return null;
+    var title = previewLine(fld(data, "title"), 300);
+    var desc = previewLine(fld(data, "description", "desc"), 400);
+    var site = previewLine(fld(data, "site", "site_name", "siteName"), 60);
+    // A card that would say nothing the message does not already say is worse
+    // than no card.
+    if (!title && !desc) return null;
+
+    var card = document.createElement("a");
+    card.className = "lp";
+    card.href = href;                       // safeUrl again — never the raw field
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    card.title = href;
+
+    var img = previewImageSrc(fld(data, "image", "image_url", "imageUrl"));
+    if (img) {
+      var plate = el("img", "lp-thumb");
+      plate.alt = "";
+      plate.loading = "lazy";
+      // A plate that fails to load removes itself rather than leaving a hole;
+      // the card is laid out to be right without one.
+      plate.addEventListener("error", function () {
+        if (plate.parentNode) plate.parentNode.removeChild(plate);
+        card.classList.add("noimg");
+      });
+      plate.src = img;
+      card.appendChild(plate);
+    } else {
+      card.classList.add("noimg");
+    }
+
+    var box = el("div", "lp-body");
+    box.appendChild(el("div", "lp-site", site || hostOf(href)));
+    if (title) box.appendChild(el("div", "lp-title", title));
+    if (desc) box.appendChild(el("div", "lp-desc", desc));
+    card.appendChild(box);
+    return card;
+  }
+
   /* ========================= message rendering ========================== */
 
   function isDeleted(m) { return fld(m, "deleted_at", "deletedAt") != null; }
@@ -1892,8 +2592,13 @@
       body.appendChild(el("div", "bubble tomb", "This message was deleted"));
     } else {
       var text = m.text;
+      var rich = null;
       if (text != null && String(text).length) {
-        var b = el("div", "bubble", String(text));
+        // Markdown is built as nodes, never as markup. `rich.urls` is what the
+        // tokeniser already found, so the preview costs no second scan.
+        rich = richCtx();
+        var b = el("div", "bubble");
+        b.appendChild(renderRich(text, rich));
         if (m.__pending) b.classList.add("pending");
         if (isEdited(m)) b.appendChild(el("span", "edited", "(edited)"));
         body.appendChild(b);
@@ -1906,6 +2611,11 @@
         var ph = el("div", "bubble tomb", "No content in the archive for this message");
         if (isEdited(m)) ph.appendChild(el("span", "edited", "(edited)"));
         body.appendChild(ph);
+      }
+      // One card for the first link, and only for a message that exists: an
+      // optimistic row is replaced by the server's copy a moment later.
+      if (rich && rich.urls.length && !media.length && !m.__pending) {
+        attachLinkPreview(body, rich.urls[0]);
       }
     }
 
@@ -2378,14 +3088,30 @@
   var draftsEl = $("drafts");
   var localSeq = 0;
 
+  // Whether the field has the caret, which is the only thing the keyboard hint
+  // in the footer is conditioned on — a permanent hint is furniture.
+  var composerFocus = false;
+
+  // An error owns the footer line until it is cleared, and the full text is on
+  // the title because the line is deliberately one line and elides.
   function setError(msg) {
     cnote.textContent = msg || "";
     cnote.className = msg ? "grow cerr" : "grow";
+    cnote.title = msg || "";
+    if (!msg) syncComposer();
   }
+
+  // Mirrors `.composer-box textarea { max-height }`. The field grows with the
+  // draft and only starts scrolling once it would take too much of the page.
+  var INPUT_MAX_PX = 176;
 
   function autoGrow() {
     input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 136) + "px";
+    var want = input.scrollHeight;
+    input.style.height = Math.min(want, INPUT_MAX_PX) + "px";
+    // No scrollbar until it is actually needed; one that appears and vanishes
+    // as you type is what made the old box feel cheap.
+    input.style.overflowY = want > INPUT_MAX_PX ? "auto" : "hidden";
   }
 
   // `[...str].length` counts code points, matching the Rust side's `chars()`.
@@ -2406,11 +3132,25 @@
     attachBtn.disabled = state.sending || !state.active || !!state.editing;
 
     input.placeholder = state.editing ? "Edit your message" : "Message";
-    if (!cnote.classList.contains("cerr")) {
-      cnote.textContent = state.connected === false
-        ? "You're offline — messages will fail to send until the connection is back."
-        : "";
+    var sendLabel = state.editing ? "Save the edit" : "Send";
+    sendBtn.title = sendLabel;
+    sendBtn.setAttribute("aria-label", sendLabel);
+
+    if (cnote.classList.contains("cerr")) return;
+    var note = "", hint = false;
+    if (state.connected === false) {
+      note = "You're offline — messages will fail to send until the connection is back.";
+    } else if (uploading) {
+      note = "Uploading…";
+    } else if (composerFocus) {
+      note = state.editing
+        ? "Enter saves · Shift+Enter for a new line · Esc cancels"
+        : "Enter sends · Shift+Enter for a new line";
+      hint = true;
     }
+    cnote.className = "grow" + (hint ? " hint" : "");
+    cnote.textContent = note;
+    cnote.title = "";
   }
 
   function startReply(m) {
@@ -2459,13 +3199,14 @@
   function clearDrafts() {
     state.drafts = [];
     draftsEl.textContent = "";
+    draftsEl.classList.remove("show");
     syncComposer();
   }
 
   function renderDrafts() {
     draftsEl.textContent = "";
     state.drafts.forEach(function (d, i) {
-      var box = el("div", "draft-att");
+      var box = el("div", "draft-att" + (d.error ? " failed" : ""));
       var img = document.createElement("img");
       img.src = d.dataUrl;
       img.alt = "Image to send";
@@ -2478,6 +3219,9 @@
       else if (d.error) box.appendChild(el("div", "up", "Failed"));
       draftsEl.appendChild(box);
     });
+    // The tray is a section of the field, so it must collapse completely when
+    // it is empty rather than leaving a padded strip behind.
+    draftsEl.classList.toggle("show", state.drafts.length > 0);
     syncComposer();
   }
 
@@ -2904,15 +3648,86 @@
 
   /* ============================== realtime =============================== */
 
-  function setConn(connected, label) {
+  /* ---------- the header pill ----------
+
+     Two signals, one pill, and connectivity outranks the socket.
+
+     `realtime://state` describes the websocket. Its `unauthorized` status is
+     *latched* in Rust: `Worker::run` publishes it and returns, because retrying
+     a refused token cannot succeed — so nothing will ever supersede that value
+     for the life of the process. Painting it directly meant that hours later,
+     on an ordinary network drop, the header still read UNAUTHORIZED: wrong,
+     because the socket is not the reason nothing is arriving, and alarming in a
+     way "offline" is not.
+
+     So the socket is consulted only while the app is online. Offline is decided
+     by the Rust connectivity monitor (which probes) or by `navigator.onLine`,
+     and either one saying so is enough. An auth problem can therefore only be
+     shown when there is a working connection for the credential to have been
+     refused over — which is the only situation in which it is actionable.    */
+
+  function isOffline() {
+    return state.net === "offline" || navigator.onLine === false;
+  }
+
+  var AUTH_STATUS = /^(unauthorized|unauthorised|unauthenticated|forbidden|invalid[_ -]?token|signed[_ -]?out)$/;
+
+  function classifyRt(a) {
+    var raw = String(a.label == null ? "" : a.label).toLowerCase().trim();
+    var auth = !a.connected && AUTH_STATUS.test(raw);
+    var label;
+    // Short on purpose: the pill sits between the wordmark and the UI toggle in
+    // a 292 px sidebar. The whole explanation is on the pill's title.
+    if (a.connected) label = "Live";
+    else if (auth) label = "Sign in";
+    else if (raw === "connecting") label = "Connecting";
+    else if (raw === "disconnected" || raw === "closed") label = "Reconnecting";
+    else label = a.label ? String(a.label) : "Offline";
+    return { connected: !!a.connected, auth: auth, label: label, raw: raw };
+  }
+
+  function paintConn() {
+    var rt = state.rt;
+    var connected, label, tone, title;
+
+    if (!HAS_IPC) {
+      connected = null; tone = null; label = "Preview";
+      title = "Opened outside the app, so this is preview data.";
+    } else if (isOffline()) {
+      // Ahead of every socket state, including a latched auth failure.
+      connected = false; tone = "down"; label = "Offline";
+      title = "No connection. Every archived message is still readable here; " +
+              "sending will fail until you are back online.";
+    } else if (rt && rt.auth) {
+      connected = false; tone = "down"; label = "Sign in";
+      title = "GroupMe refused the saved session, so nothing new will arrive. " +
+              "Switch to the GroupMe web UI once to sign in again. Everything " +
+              "already archived is still readable here.";
+    } else if (state.net === "degraded" && !(rt && rt.connected)) {
+      connected = false; tone = "warn"; label = "Unstable";
+      title = "The connection is dropping requests. Reading is local and " +
+              "unaffected; sending may fail.";
+    } else if (!rt) {
+      connected = null; tone = null; label = "Connecting";
+      title = "Opening the realtime connection.";
+    } else {
+      connected = rt.connected;
+      // "Connecting" is a transient state on the way to working, so it is not
+      // painted in the alarm colour.
+      tone = rt.connected ? "live" : (rt.raw === "connecting" ? null : "down");
+      label = rt.label;
+      title = rt.connected
+        ? "Connected — new messages arrive as they are sent"
+        : "Not connected — you can read everything, but sending will fail";
+    }
+
     state.connected = connected;
     var pill = $("conn");
-    pill.classList.toggle("live", connected === true);
-    pill.classList.toggle("down", connected === false);
-    $("connText").textContent = label || (connected ? "Live" : "Offline");
-    pill.title = connected
-      ? "Connected — new messages arrive as they are sent"
-      : "Not connected — you can read everything, but sending will fail";
+    pill.classList.toggle("live", tone === "live");
+    pill.classList.toggle("down", tone === "down");
+    pill.classList.toggle("warn", tone === "warn");
+    $("connText").textContent = label;
+    pill.title = title;
     syncComposer();
   }
 
@@ -2958,10 +3773,19 @@
     if (a.cid === state.active) updateSub();
   }
 
+  // Recorded, then resolved. It is never painted on its own.
   function onRealtimeState(evt) {
     var a = adaptState(evt);
     if (!a) return;
-    setConn(a.connected, a.label);
+    state.rt = classifyRt(a);
+    paintConn();
+  }
+
+  function onConnectivity(evt) {
+    var s = adaptConnectivity(evt);
+    if (s == null) return;
+    state.net = s;
+    paintConn();
   }
 
   async function subscribe() {
@@ -2971,6 +3795,9 @@
       ["realtime://reaction", onRealtimeReaction],
       ["realtime://typing", onRealtimeTyping],
       ["realtime://state", onRealtimeState],
+      // The Rust connectivity monitor's probe result. Outranks the socket state
+      // above when it says offline — see paintConn.
+      ["archive://connectivity", onConnectivity],
       // Emitted by the existing sync loop; the conversation list and the
       // footer counters are stale until it fires.
       ["archive://synced", onSynced]
@@ -3079,6 +3906,9 @@
     call("client_typing", { conversationId: state.active, kind: state.activeKind || "group" });
   }
 
+  input.addEventListener("focus", function () { composerFocus = true; syncComposer(); });
+  input.addEventListener("blur", function () { composerFocus = false; syncComposer(); });
+
   input.addEventListener("input", function () {
     autoGrow();
     if (cnote.classList.contains("cerr")) setError("");
@@ -3123,10 +3953,14 @@
     if ((e.key === "f" || e.key === "F") && (e.ctrlKey || e.metaKey)) { e.preventDefault(); qEl.focus(); qEl.select(); }
   });
 
-  // Fallback only. `realtime://state` is authoritative when it arrives; these
-  // two events at least keep the pill honest if it never does.
-  window.addEventListener("online", function () { if (state.connected === null) setConn(true, "Live"); });
-  window.addEventListener("offline", function () { setConn(false, "Offline"); });
+  /* The Rust monitor is the authority on reachability — `navigator.onLine`
+     reports whether an interface exists, not whether anything is reachable
+     through it, which is exactly what a captive portal defeats. But it flips
+     instantly where the monitor takes up to a probe interval, and `isOffline`
+     reads it directly, so repainting is the whole job here. The monitor polls
+     every 5 s while it believes it is offline, so recovery is quick. */
+  window.addEventListener("online", paintConn);
+  window.addEventListener("offline", paintConn);
 
   /* =============================== boot ================================= */
 
@@ -3143,8 +3977,9 @@
   (async function boot() {
     loadReadAt();
     autoGrow();
-    setConn(HAS_IPC ? (navigator.onLine ? null : false) : null, HAS_IPC ? "Connecting" : "Preview");
-    if (!HAS_IPC) state.connected = null;
+    // Neither signal has reported yet; paintConn resolves that to "Connecting"
+    // when online and "Offline" when navigator already knows better.
+    paintConn();
 
     // Arriving here IS the preference — however the user got here, the last
     // surface used is the one the router should reopen next launch.
