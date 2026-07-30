@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::model::{id_sort_key, Chat, Conversation, ConversationKind, Group, Message};
+use crate::model::{id_sort_key, Chat, Conversation, ConversationKind, Group, Member, Message};
 
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -889,6 +889,150 @@ impl Store {
         let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+
+    /// Everything the archive knows about one person: their name and avatar, the
+    /// groups you both belong to, whether a DM with them exists, and how much of
+    /// their history is stored. Read-only; drives the profile card.
+    ///
+    /// Membership is not indexed — it lives only in each group's `members_json`
+    /// — so shared groups are found by scanning the (few hundred) groups and
+    /// parsing their member lists. That is fine for an on-demand, one-user
+    /// lookup and avoids a second membership table the sync would have to keep
+    /// in step.
+    pub fn user_profile(&self, user_id: &str) -> Result<UserProfile> {
+        // Identity: the users table is the canonical name/avatar, but a person
+        // we have messages from may predate ever being upserted there, so fall
+        // back to their most recent message.
+        let (mut name, mut avatar_url): (Option<String>, Option<String>) = self
+            .conn
+            .query_row(
+                "SELECT name, avatar_url FROM users WHERE id = ?1",
+                [user_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None));
+        if name.is_none() || avatar_url.is_none() {
+            if let Some((n, a)) = self
+                .conn
+                .query_row(
+                    "SELECT name, avatar_url FROM messages
+                     WHERE user_id = ?1 AND name IS NOT NULL
+                     ORDER BY id_sort DESC LIMIT 1",
+                    [user_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()?
+            {
+                name = name.or(n);
+                avatar_url = avatar_url.or(a);
+            }
+        }
+
+        // Shared groups: scan each group's stored member list for this user.
+        let mut shared_groups = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, name, image_url, members_json FROM conversations
+                 WHERE kind = 'group' AND members_json IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, group_name, image_url, members_json) = row?;
+                let Some(mj) = members_json else { continue };
+                // A single group with malformed member JSON must not fail the
+                // whole lookup — treat it as no members.
+                let members: Vec<Member> = serde_json::from_str(&mj).unwrap_or_default();
+                if members
+                    .iter()
+                    .any(|m| m.user_id.as_deref() == Some(user_id))
+                {
+                    shared_groups.push(GroupRef {
+                        id,
+                        name: group_name,
+                        avatar_url: image_url,
+                    });
+                }
+            }
+        }
+        shared_groups.sort_by(|a, b| {
+            a.name
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&b.name.as_deref().unwrap_or("").to_lowercase())
+        });
+
+        // A DM is stored under the other participant's bare user id, so the DM's
+        // conversation id is exactly `user_id` when one exists.
+        let dm_conversation_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM conversations WHERE kind = 'dm' AND id = ?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        let (message_count, first_seen, last_seen) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(created_at), MAX(created_at)
+             FROM messages WHERE user_id = ?1",
+            [user_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+
+        Ok(UserProfile {
+            user_id: user_id.to_string(),
+            name,
+            avatar_url,
+            shared_groups,
+            dm_conversation_id,
+            message_count,
+            first_seen,
+            last_seen,
+        })
+    }
+}
+
+/// A group referenced from a profile card: enough to render and open it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupRef {
+    pub id: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// What the archive knows about one user — see [`Store::user_profile`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub user_id: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub shared_groups: Vec<GroupRef>,
+    /// The DM's conversation id (equal to `user_id`) when a DM with them is
+    /// archived, else `None`.
+    pub dm_conversation_id: Option<String>,
+    pub message_count: i64,
+    pub first_seen: Option<i64>,
+    pub last_seen: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1345,6 +1489,113 @@ mod tests {
             "last_read_message_id was erased by a list sync"
         );
         assert_eq!(c.updated_at, 200, "the rest of the row should still update");
+    }
+
+    /// The profile card's data in one lookup: identity, the groups you share,
+    /// whether a DM exists, and how much of their history is stored.
+    #[test]
+    fn user_profile_gathers_identity_shared_groups_dm_and_counts() {
+        let mut s = Store::open_in_memory().unwrap();
+
+        // A group we are both in — the member row carries their name and avatar.
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                name: Some("Book Club".into()),
+                image_url: Some("https://img/group.png".into()),
+                updated_at: 100,
+                members: vec![Member {
+                    user_id: Some("20000002".into()),
+                    nickname: Some("Sam".into()),
+                    image_url: Some("https://img/sam.png".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        // A group they are in but we are not both in — must not count as shared.
+        s.upsert_group(
+            &Group {
+                id: "10000002".into(),
+                name: Some("Strangers".into()),
+                updated_at: 100,
+                members: vec![Member {
+                    user_id: Some("20000009".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        // A DM with them: stored under their bare user id.
+        s.upsert_chat(
+            &Chat {
+                updated_at: 200,
+                other_user: OtherUser {
+                    id: "20000002".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        s.insert_messages(
+            "10000001",
+            &[
+                Message {
+                    id: "170000000000000001".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Sam".into()),
+                    created_at: 1000,
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000002".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Sam".into()),
+                    created_at: 2000,
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        let p = s.user_profile("20000002").unwrap();
+        assert_eq!(p.user_id, "20000002");
+        assert_eq!(p.name.as_deref(), Some("Sam"));
+        assert_eq!(p.avatar_url.as_deref(), Some("https://img/sam.png"));
+        assert_eq!(
+            p.shared_groups
+                .iter()
+                .map(|g| g.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["10000001"],
+            "only the group we are both in is shared"
+        );
+        assert_eq!(p.shared_groups[0].name.as_deref(), Some("Book Club"));
+        assert_eq!(p.dm_conversation_id.as_deref(), Some("20000002"));
+        assert_eq!(p.message_count, 2);
+        assert_eq!(p.first_seen, Some(1000));
+        assert_eq!(p.last_seen, Some(2000));
+    }
+
+    /// Someone we hold nothing on still resolves — empty, not an error, and no
+    /// phantom DM (a bare user id must not be mistaken for a DM that isn't there).
+    #[test]
+    fn user_profile_of_a_stranger_is_empty_not_an_error() {
+        let s = Store::open_in_memory().unwrap();
+        let p = s.user_profile("29999999").unwrap();
+        assert!(p.shared_groups.is_empty());
+        assert_eq!(p.dm_conversation_id, None);
+        assert_eq!(p.message_count, 0);
+        assert_eq!(p.name, None);
     }
 
     /// Receipts key DMs by the `+`-joined thread key; this table keys them by the

@@ -331,6 +331,7 @@
   .avatar.sm { width: 26px; height: 26px; font-size: .58rem; }
   .avatar.hd { width: 34px; height: 34px; font-size: .72rem; }
   .avatar.square { border-radius: 1px; }
+  .avatar.clickable { cursor: pointer; }
 
   .side-foot {
     border-top: 1px solid var(--rule); padding: .55rem .8rem;
@@ -1331,6 +1332,7 @@
 <div class="pop menu" id="menuPop" role="menu" aria-label="Message actions"></div>
 <div class="pop datepop" id="datePop" role="dialog" aria-label="Jump to a date"></div>
 <div class="sheet" id="convSheet" role="dialog" aria-modal="true" aria-label="Conversation settings"></div>
+<div class="sheet" id="profileCard" role="dialog" aria-modal="true" aria-label="User profile"></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -1862,16 +1864,19 @@
     return pending;
   }
 
-  function makeAvatar(name, url, seed, cls) {
-    var node = el("div", "avatar" + (cls ? " " + cls : ""), initials(name));
+  function makeAvatar(name, url, seed, cls, uid) {
+    var baseCls = "avatar" + (cls ? " " + cls : "") + (uid ? " clickable" : "");
+    var node = el("div", baseCls, initials(name));
     node.style.background = tintFor(seed || name);
     node.setAttribute("aria-hidden", "true");
+    if (uid) node.addEventListener("click", function () { openProfile(uid, name); });
     if (url) {
       resolveMedia(url).then(function (path) {
         if (!path || !node.isConnected) return;
-        var img = el("img", node.className);
+        var img = el("img", baseCls);
         img.src = localSrc(path);
         img.alt = "";
+        if (uid) img.addEventListener("click", function () { openProfile(uid, name); });
         img.onload = function () { if (node.isConnected) node.replaceWith(img); };
       });
     }
@@ -2989,7 +2994,7 @@
     if (cont || mine) {
       wrap.appendChild(el("div", "gutter"));
     } else {
-      wrap.appendChild(makeAvatar(m.name, fld(m, "avatar_url", "avatarUrl"), m.user_id || m.name, "sm"));
+      wrap.appendChild(makeAvatar(m.name, fld(m, "avatar_url", "avatarUrl"), m.user_id || m.name, "sm", m.user_id));
     }
 
     var body = el("div", "msg-body");
@@ -3867,13 +3872,14 @@
   /* ============================= popovers =============================== */
 
   var scrim = $("scrim"), emojiPop = $("emojiPop"), menuPop = $("menuPop");
-  var datePop = $("datePop"), convSheet = $("convSheet");
+  var datePop = $("datePop"), convSheet = $("convSheet"), profileCard = $("profileCard");
 
   function closePops() {
     emojiPop.classList.remove("show");
     menuPop.classList.remove("show");
     datePop.classList.remove("show");
     convSheet.classList.remove("show");
+    profileCard.classList.remove("show");
     scrim.classList.remove("show");
   }
 
@@ -4188,6 +4194,95 @@
       blocked ? ("Blocked " + shortName(name)) : ("Unblocked " + shortName(name)));
   }
 
+  async function openProfile(uid, fallbackName) {
+    if (!uid) return;
+    closePops();
+    var p = await call("archive_user_profile", { userId: String(uid) });
+
+    profileCard.textContent = "";
+
+    var head = el("div", "sheet-head");
+    var displayName = (p && fld(p, "name")) || fallbackName || "Unknown";
+    var avatarUrl = p ? fld(p, "avatar_url", "avatarUrl") : null;
+    head.appendChild(makeAvatar(displayName, avatarUrl, uid, "hd"));
+    var ht = el("div", "sheet-headtext");
+    ht.appendChild(el("div", "sheet-title", displayName));
+    var userId = (p && fld(p, "user_id", "userId")) || String(uid);
+    ht.appendChild(el("div", "sheet-sub", "#" + userId));
+    head.appendChild(ht);
+    var x = btn("sheet-x", "Close", closePops);
+    x.appendChild(icon("x"));
+    head.appendChild(x);
+    profileCard.appendChild(head);
+
+    var body = el("div", "sheet-body");
+
+    if (!p) {
+      body.appendChild(el("div", "sheet-note", "Couldn't load this profile."));
+      profileCard.appendChild(body);
+      profileCard.classList.add("show");
+      scrim.classList.add("show");
+      return;
+    }
+
+    var msgCount = Number(fld(p, "message_count", "messageCount") || 0);
+    var firstSeen = fld(p, "first_seen", "firstSeen");
+    var lastSeen = fld(p, "last_seen", "lastSeen");
+    var metaBits = [msgCount.toLocaleString() + (msgCount === 1 ? " message archived" : " messages archived")];
+    if (firstSeen) metaBits.push("first seen " + relTime(firstSeen));
+    if (lastSeen) metaBits.push("last seen " + relTime(lastSeen));
+    body.appendChild(el("div", "sheet-note", metaBits.join(" · ")));
+
+    var dmCid = fld(p, "dm_conversation_id", "dmConversationId");
+    if (dmCid) {
+      var dmBtn = el("button", "sheet-act", "");
+      dmBtn.type = "button";
+      dmBtn.appendChild(icon("logo"));
+      dmBtn.appendChild(el("span", null, "Open direct message"));
+      dmBtn.addEventListener("click", function () { closePops(); openConversation(String(dmCid)); });
+      var dmRow = el("div", "sheet-actions");
+      dmRow.appendChild(dmBtn);
+      body.appendChild(dmRow);
+    } else {
+      body.appendChild(el("div", "sheet-note", "No direct messages archived."));
+    }
+
+    var shared = Array.isArray(fld(p, "shared_groups", "sharedGroups")) ? fld(p, "shared_groups", "sharedGroups") : [];
+    var grpSec = el("div", "sheet-sec", "Shared groups");
+    grpSec.appendChild(el("span", "cnt", shared.length.toLocaleString()));
+    body.appendChild(grpSec);
+    if (shared.length) {
+      var grpList = el("div", "members");
+      shared.forEach(function (g) {
+        var gRow = el("div", "member");
+        gRow.style.cursor = "pointer";
+        gRow.appendChild(makeAvatar(g.name, fld(g, "avatar_url", "avatarUrl", "image_url", "imageUrl"), g.id, "sm square"));
+        gRow.appendChild(el("div", "member-text"));
+        gRow.lastChild.appendChild(el("div", "member-name", g.name || String(g.id)));
+        gRow.addEventListener("click", function () { closePops(); openConversation(String(g.id)); });
+        grpList.appendChild(gRow);
+      });
+      body.appendChild(grpList);
+    } else {
+      body.appendChild(el("div", "sheet-note", "No shared groups."));
+    }
+
+    var blockSec = el("div", "sheet-sec", "Actions");
+    body.appendChild(blockSec);
+    var blocked = isBlocked(uid);
+    var blockBtn = sheetAct(blocked ? "Unblock" : "Block user", "block", blocked, true, function () {
+      blockMember(String(uid), displayName, !blocked);
+      closePops();
+    });
+    var blockRow = el("div", "sheet-actions");
+    blockRow.appendChild(blockBtn);
+    body.appendChild(blockRow);
+
+    profileCard.appendChild(body);
+    profileCard.classList.add("show");
+    scrim.classList.add("show");
+  }
+
   /* ---------- the sidebar row overflow menu ---------- */
 
   function openConvMenu(anchor, c) {
@@ -4379,7 +4474,7 @@
   function memberRow(m, nm) {
     var row = el("div", "member");
     row.appendChild(makeAvatar(nm, fld(m, "image_url", "imageUrl", "avatar_url", "avatarUrl"),
-      fld(m, "user_id", "userId") || nm, "sm"));
+      fld(m, "user_id", "userId") || nm, "sm", fld(m, "user_id", "userId")));
     var tx = el("div", "member-text");
     tx.appendChild(el("div", "member-name", nm));
     var realName = fld(m, "name"), nick = fld(m, "nickname");
@@ -4944,6 +5039,18 @@
       else if (state.reply) { cancelReply(); syncComposer(); e.stopPropagation(); }
     }
   });
+  input.addEventListener("paste", function (e) {
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    var imageFiles = [];
+    for (var i = 0; i < items.length; i++) {
+      if (/^image\//i.test(items[i].type)) {
+        var f = items[i].getAsFile();
+        if (f) imageFiles.push(f);
+      }
+    }
+    if (imageFiles.length) { e.preventDefault(); attachFiles(imageFiles); }
+  });
 
   // Dropping an image on the thread attaches it rather than navigating the
   // webview to a file:// URL, which is what the default handler would do.
@@ -4965,7 +5072,8 @@
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
       if (emojiPop.classList.contains("show") || menuPop.classList.contains("show") ||
-          datePop.classList.contains("show") || convSheet.classList.contains("show")) { closePops(); return; }
+          datePop.classList.contains("show") || convSheet.classList.contains("show") ||
+          profileCard.classList.contains("show")) { closePops(); return; }
       if (findbarEl.classList.contains("show")) { closeFind(); return; }
       if (bannerEl.classList.contains("show")) { showBanner(null); return; }
       if (qEl.value) { clearSearch(); qEl.blur(); }

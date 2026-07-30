@@ -1,6 +1,6 @@
 {
   "name": "groupme-desktop",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "GroupMe for Windows — native desktop app (Tauri 2) wrapping web.groupme.com with a local SQLite archive for offline reading",
   "author": "Shalom Karr",

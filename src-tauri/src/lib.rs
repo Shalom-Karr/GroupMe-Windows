@@ -101,6 +101,7 @@ pub fn run() {
             commands::archive_message_near_date,
             commands::archive_media_path,
             commands::archive_stats,
+            commands::archive_user_profile,
             client_commands::client_send_message,
             client_commands::client_edit_message,
             client_commands::client_delete_message,

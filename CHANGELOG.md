@@ -2,6 +2,23 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.6.0] — 2026-07-30
+
+Know who you are talking to, and paste a screenshot straight in.
+
+### Added
+
+- **Profile cards.** Clicking anyone's avatar — in the message list or a group's
+  member list — opens a card with everything the archive knows about them: their
+  name and picture, the groups you both belong to (each opens on click), a link
+  to your DM with them when one is archived, how many of their messages are
+  stored and when they were first and last seen, and a block/unblock action. A
+  new read-only `archive_user_profile` command serves it; shared groups are found
+  by scanning each group's stored membership, so it works fully offline.
+- **Paste an image into the composer.** Copy a screenshot (or any image) and
+  paste it into the message box to attach it — the same path as picking a file or
+  dropping one in. Pasting text is unchanged.
+
 ## [0.5.0] — 2026-07-30
 
 Conversation management, a denser client, and resilience against a network

@@ -16,7 +16,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::model::{id_sort_key, Conversation, Message};
-use crate::store::{SearchHit, Store};
+use crate::store::{SearchHit, Store, UserProfile};
 
 /// A **blocking** mutex on purpose. `Store` is synchronous rusqlite, so every
 /// access happens inside `spawn_blocking` (see `read_store`) and never on a
@@ -201,6 +201,20 @@ pub async fn archive_stats(store: State<'_, SharedStore>) -> CmdResult<ArchiveSt
     .await
 }
 
+/// Everything the archive knows about one user — identity, the groups you both
+/// belong to, whether a DM with them exists, and how much of their history is
+/// stored. Drives the profile card the client opens when an avatar is clicked.
+#[tauri::command]
+pub async fn archive_user_profile(
+    store: State<'_, SharedStore>,
+    user_id: String,
+) -> CmdResult<UserProfile> {
+    read_store(store.inner(), "loading a user profile", move |s| {
+        s.user_profile(&user_id)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +272,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 6, "expected exactly the six archive readers");
+        assert_eq!(found, 7, "expected exactly the seven archive readers");
     }
 
     #[test]
