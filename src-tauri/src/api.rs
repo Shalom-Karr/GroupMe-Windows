@@ -95,6 +95,21 @@ pub enum ApiError {
     Transport(#[from] reqwest::Error),
     #[error("decode: {0}")]
     Decode(String),
+    /// The response did not come from GroupMe. A filtering proxy answered
+    /// instead — typically its own block page, served as HTML with a 200 so
+    /// nothing in the status code betrays it.
+    ///
+    /// This is its own variant because the consequences are entirely different
+    /// from a decode bug: retrying cannot help, the archive quietly loses an
+    /// entire class of content, and the only thing that resolves it is a change
+    /// to the filter's policy — which is not this app's business to attempt. It
+    /// exists so the app can say what happened instead of reporting a healthy
+    /// sync over an archive that is missing every group.
+    #[error(
+        "{path} was intercepted by a network filter at {host} — GroupMe never saw the request, \
+             so this content cannot be archived until that filter permits it"
+    )]
+    Intercepted { path: String, host: String },
 }
 
 // Clone is cheap (reqwest::Client is an Arc internally) and lets the sync
@@ -253,8 +268,50 @@ impl GroupMeClient {
                         .query(&[("per_page", "100"), ("page", page_str.as_str())])
                 })
                 .await?;
-            let items: Vec<T> = decode_envelope(resp).await?;
+            // Parsed from text rather than straight off the response so an empty
+            // first page can say why. A list endpoint answering 200 with nothing
+            // is indistinguishable, downstream, from an account that owns no
+            // groups — and that ambiguity hid every group vanishing from the
+            // archive with no error anywhere.
+            let status = resp.status();
+            // The *final* URL, after any redirect reqwest followed. A body of
+            // HTML on a 200 usually means the request ended up somewhere other
+            // than the API, and the requested URL alone cannot show that.
+            let final_url = resp.url().to_string();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| ApiError::Decode(e.to_string()))?;
+
+            // A different host answering, or an HTML body, means this never
+            // reached the API. Distinguished before parsing so the failure is
+            // reported as interception rather than as malformed JSON.
+            if let Some(host) = intercepting_host(&url, &final_url, &body) {
+                return Err(ApiError::Intercepted {
+                    path: path.to_string(),
+                    host,
+                });
+            }
+            // The status and a body excerpt go into the error itself. A bare
+            // "expected value at line 1 column 1" is true of an empty body, an
+            // HTML error page and a gzip frame alike, and says nothing about
+            // which — that ambiguity cost a full debugging pass.
+            let env: Envelope<Vec<T>> = serde_json::from_str(&body).map_err(|e| {
+                ApiError::Decode(format!(
+                    "{path} page {page} (HTTP {status}, {} bytes, final url {final_url}): {e}; \
+                     body starts: {:?}",
+                    body.len(),
+                    body.chars().take(120).collect::<String>()
+                ))
+            })?;
+            let items: Vec<T> = env.response.unwrap_or_default();
             let n = items.len();
+            if page == 1 && n == 0 {
+                log::warn!(
+                    "{path} returned no items on page 1 (HTTP {status}): {}",
+                    body.chars().take(400).collect::<String>()
+                );
+            }
             all.extend(items);
             if n < MAX_PAGE_LIMIT as usize {
                 break;
@@ -639,6 +696,46 @@ fn sort_ascending(msgs: &mut [Message]) {
 /// Decodes a response body as `Envelope<T>`, returning `T::default()` when
 /// GroupMe sends `"response": null` — the backfill terminator at the start of
 /// a conversation's history.
+/// Detects a response that came from something other than the API.
+///
+/// Two independent signals, because either can occur alone: the request ended on
+/// a different host than it was sent to (a filter redirect), or the body is an
+/// HTML document where JSON was expected (a transparent proxy substituting a
+/// page without redirecting). Returns the host to name in the error.
+///
+/// Deliberately conservative — it must not misclassify a genuine API error. Both
+/// checks require positive evidence, and a JSON body always passes.
+fn intercepting_host(requested: &str, final_url: &str, body: &str) -> Option<String> {
+    let host_of = |u: &str| {
+        u.split("://")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .map(|h| h.to_ascii_lowercase())
+    };
+    let want = host_of(requested);
+    let got = host_of(final_url);
+
+    if let (Some(want), Some(got)) = (&want, &got) {
+        if want != got {
+            return Some(got.clone());
+        }
+    }
+
+    let head = body.trim_start();
+    let looks_like_html = head.len() >= 5
+        && (head[..5].eq_ignore_ascii_case("<html")
+            || head
+                .get(..9)
+                .is_some_and(|s| s.eq_ignore_ascii_case("<!doctype")));
+    if looks_like_html {
+        return Some(
+            got.or(want)
+                .unwrap_or_else(|| "an unknown host".to_string()),
+        );
+    }
+    None
+}
+
 async fn decode_envelope<T: DeserializeOwned + Default>(resp: Response) -> Result<T, ApiError> {
     let env: Envelope<T> = resp
         .json()
@@ -653,6 +750,46 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_filter_block_page_is_reported_as_interception_not_bad_json() {
+        // The real shape of this: a content filter answered /v3/groups with its
+        // own page, HTTP 200, on its own host. Parsed as JSON it is only
+        // "expected value at line 1 column 1", which reads like our bug and
+        // silently cost every group in the archive.
+        let host = intercepting_host(
+            "https://api.groupme.com/v3/groups",
+            "https://filter.example.com/?error=access",
+            "<!doctype html>\n<html lang=\"en\">",
+        );
+        assert_eq!(host.as_deref(), Some("filter.example.com"));
+
+        // A transparent proxy that substitutes a page without redirecting.
+        assert_eq!(
+            intercepting_host(
+                "https://api.groupme.com/v3/groups",
+                "https://api.groupme.com/v3/groups",
+                "<html><body>Blocked</body></html>",
+            )
+            .as_deref(),
+            Some("api.groupme.com")
+        );
+
+        // Genuine API responses must never be misread as interception — an
+        // error envelope is still the API talking, and needs its own handling.
+        assert!(intercepting_host(
+            "https://api.groupme.com/v3/groups",
+            "https://api.groupme.com/v3/groups",
+            r#"{"meta":{"code":200},"response":[]}"#,
+        )
+        .is_none());
+        assert!(intercepting_host(
+            "https://api.groupme.com/v3/groups",
+            "https://api.groupme.com/v3/groups",
+            r#"{"meta":{"code":404,"errors":["not found"]}}"#,
+        )
+        .is_none());
+    }
 
     /// Synthetic throughout — this repository is public and GroupMe user ids
     /// are stable and correlatable.

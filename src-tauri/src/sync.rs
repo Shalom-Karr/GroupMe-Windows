@@ -761,8 +761,17 @@ impl SyncEngine {
                     }
                     if is_permanent(&e) {
                         self.blocked_media.lock().await.insert(url.clone());
+                        // Expected, and there is one per attachment: GroupMe's
+                        // attachment URLs redirect to expiring signed CDN links,
+                        // so an old image answers 403 forever (§10). Logging each
+                        // one floods the file and rotates away the lines that
+                        // matter — it has already buried two real diagnoses.
+                        // The blocked set means each URL is only tried once, so
+                        // `trace` still shows the full list when asked for.
+                        log::trace!("media permanently unavailable: {url}: {e}");
+                    } else {
+                        log::debug!("media fetch failed for {url}: {e}");
                     }
-                    log::debug!("media fetch failed for {url}: {e}");
                     continue;
                 }
             };

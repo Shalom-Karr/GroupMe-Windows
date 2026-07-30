@@ -578,6 +578,16 @@ async fn run_sync_loop(
             report.messages_inserted,
             report.media_cached
         );
+        // Errors were previously collected into the report and then only ever
+        // emitted to the window, so a cycle could fail to list groups at all —
+        // losing every group from the archive — and leave nothing in the log to
+        // say so. Capped because one broken conversation can fail every cycle.
+        if !report.errors.is_empty() {
+            log::warn!("sync reported {} error(s):", report.errors.len());
+            for e in report.errors.iter().take(10) {
+                log::warn!("  {e}");
+            }
+        }
         {
             let store = store.clone();
             let _ = tokio::task::spawn_blocking(move || {

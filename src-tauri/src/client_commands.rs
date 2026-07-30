@@ -197,15 +197,34 @@ fn reply_attachment(reply_to: &str, reply_to_user_id: Option<&str>) -> Result<Va
     Ok(att)
 }
 
-/// Derives the recipient of a DM from its thread key.
+/// Derives the recipient of a DM.
 ///
-/// A DM's conversation id is `"<a>+<b>"` with the two user ids in ascending
-/// order, so the recipient is whichever half is not the signed-in account.
+/// Two forms reach this. **The archive stores a DM under the other participant's
+/// user id** — `upsert_chat` keys on `other_user.id` — and that bare id *is*
+/// already the recipient. The composite `"<a>+<b>"` thread key, ascending, is
+/// what arrives on realtime frames and read receipts; there the recipient is
+/// whichever half is not the signed-in account.
 ///
-/// Every failure here is an error, never a guess. Sending a direct message to
-/// the wrong person is not something the user can take back, so an unknown
-/// signed-in id has to stop the send rather than pick a half.
+/// Handling only the composite form is what broke sending in every DM: the
+/// stored id has no `+`, so this returned "not a direct-message thread key" and
+/// the send failed before a request was ever made.
+///
+/// Every failure is an error, never a guess. Sending a direct message to the
+/// wrong person is not something the user can take back, so an unknown signed-in
+/// id stops a composite-form send rather than picking a half.
 fn dm_recipient(conversation_id: &str, signed_in_user_id: Option<&str>) -> Result<String, String> {
+    let id = conversation_id.trim();
+    if id.is_empty() {
+        return Err("cannot send a direct message without a recipient".into());
+    }
+
+    // Stored form: already the other participant. No account id needed, which
+    // also removes a failure mode — a send no longer depends on a sync having
+    // recorded who we are.
+    if !id.contains('+') {
+        return Ok(id.to_string());
+    }
+
     let me = signed_in_user_id
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -215,7 +234,7 @@ fn dm_recipient(conversation_id: &str, signed_in_user_id: Option<&str>) -> Resul
                 .to_string()
         })?;
 
-    let (a, b) = conversation_id
+    let (a, b) = id
         .split_once('+')
         .ok_or_else(|| format!("{conversation_id:?} is not a direct-message thread key"))?;
     let (a, b) = (a.trim(), b.trim());
@@ -684,10 +703,32 @@ mod tests {
         assert!(dm_recipient("10000001+10000002", Some(ME)).is_err());
     }
 
+    /// This test used to assert that a bare id was *rejected*, on the assumption
+    /// that a DM is always addressed by its `"{a}+{b}"` thread key. That
+    /// assumption was wrong and it broke sending in every DM: `upsert_chat` keys
+    /// a DM by `other_user.id`, so the id the UI holds for a DM is a bare number
+    /// and this returned "not a direct-message thread key" before any request was
+    /// made.
+    ///
+    /// A bare id is therefore accepted — it *is* the recipient. What prevents a
+    /// group id being misread as a person is not the id's shape, which never
+    /// distinguished them, but that this is only reached once the caller has said
+    /// `kind == "dm"`; `route` rejects anything else.
     #[test]
-    fn dm_recipient_rejects_a_group_id_mistaken_for_a_thread_key() {
-        assert!(dm_recipient("99000001", Some(ME)).is_err());
+    fn a_bare_id_is_the_recipient_because_that_is_how_a_dm_is_stored() {
+        assert_eq!(dm_recipient("99000001", Some(ME)).unwrap(), "99000001");
+        // Works without knowing the signed-in account, which removes a failure
+        // mode: a send no longer depends on a sync having recorded who we are.
+        assert_eq!(dm_recipient("99000001", None).unwrap(), "99000001");
+    }
+
+    #[test]
+    fn dm_recipient_still_rejects_what_is_not_addressable() {
+        // A malformed thread key must not silently become a recipient.
         assert!(dm_recipient("+20000001", Some(ME)).is_err());
+        assert!(dm_recipient("20000001+", Some(ME)).is_err());
+        assert!(dm_recipient("", Some(ME)).is_err());
+        assert!(dm_recipient("   ", Some(ME)).is_err());
     }
 
     #[test]
