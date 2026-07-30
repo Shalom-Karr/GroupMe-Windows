@@ -2,6 +2,49 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.4.1] — 2026-07-30
+
+Two bugs that only running the app could have found — including one that made
+0.4.0's headline fix do nothing.
+
+### Fixed
+
+- **Unread was still wrong in 0.4.0, because nothing ever populated the read
+  state.** The storage and the three-tier UI rule were correct, but the fields
+  were read off the group and chat objects, where GroupMe leaves them `null` —
+  as this project's own API reference says in §4.5. Read state has exactly one
+  source, `GET /v4/read_receipts`, which returns the whole map in a single call.
+  Now fetched each sync cycle and applied to the archive.
+
+  That endpoint is enveloped like the rest of the API, and decoding its top
+  level instead of `response` produced a silent empty list — indistinguishable
+  from "you have read nothing", so every conversation still showed unread. With
+  both corrected: **375 receipts returned, 223 matched an archived conversation,
+  220 of 223 resolved to zero unread** — the sidebar went from 215 unread to 3.
+
+  Receipts key DMs by the `+`-joined thread key while the archive keys them by
+  the other participant's user id, so they are mapped through the signed-in
+  account; a receipt for a conversation we have not archived is ignored rather
+  than inserted, since a bare id carries no kind or name and would appear as a
+  blank row.
+
+  Fetching read state cannot fail the cycle: failures are logged, never added to
+  `SyncReport::errors`, because that field is what the status panel reports as
+  "sync had errors" and a stale unread dot must not make a healthy archive look
+  broken.
+
+- **Realtime died on the first DM opened.** The handshake succeeded and then
+  `/meta/subscribe` returned `Access token authentication failed`, which stops
+  the worker by design — a rejected credential must not be retried in a loop —
+  so live updates silently stopped for the rest of the session.
+
+  The archive stores a DM under the **other participant's user id**, not the
+  composite `"{a}+{b}"` thread key, so a DM id is shape-identical to a group id.
+  The channel was chosen by looking for a `+`, which meant every DM subscribed
+  to `/group/{some_user_id}` — a channel the account does not own. The kind is
+  now passed explicitly from the UI, which knows it, and is rejected rather than
+  defaulted if it is missing: defaulting is what produced the wrong channel.
+
 ## [0.4.0] — 2026-07-29
 
 A design pass over every surface, and the unread indicator finally tells the

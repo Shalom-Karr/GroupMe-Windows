@@ -205,6 +205,28 @@ value forever while the logic was perfectly correct. Use `send_if_modified`,
 which always writes, notifies only on real change, and closes the
 read-then-write race of a separate `borrow()` + `send()`.
 
+**A DM is stored under the *other participant's* user id, not the `"{a}+{b}"`
+thread key.** `upsert_chat` uses `other_user.id` as the primary key, so a DM's
+conversation id is a bare number that looks exactly like a group id. Anything
+that decides "group or DM?" by looking for a `+` is wrong for every DM the
+archive holds. That mistake subscribed every DM to `/group/{user_id}`, a channel
+the account does not own, and GroupMe answered
+`/meta/subscribe: Access token authentication failed` — which correctly stops the
+realtime worker, so live updates died on the first DM opened. Pass the kind
+explicitly and refuse to default it.
+
+**`unread_count` / `last_read_message_id` / `last_read_at` on group and chat
+objects are always `null`.** They exist in the payload, which makes them look
+usable. Read state has exactly one source: `GET /v4/read_receipts`, which returns
+the whole map in one call (375 entries here). Receipts key DMs by the `+`-joined
+thread key, so they need mapping onto the stored ids above.
+
+**`/v4` is enveloped too.** Only the endpoints listed in `docs/groupme-api.md` §3
+escape `{"meta":…,"response":…}`. Decoding the top level of an enveloped response
+does not error — it silently yields empty, which for read receipts is
+indistinguishable from "you have read nothing" and leaves every conversation
+marked unread.
+
 **`#[serde(default)]` does not handle explicit `null`.** It fires only when the
 key is *absent*. A key present with `null` goes to the field's own `Deserialize`,
 and `Vec`/`bool`/`i64`/`String` all reject it — failing the whole response.

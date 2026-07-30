@@ -23,6 +23,25 @@ use crate::model::{
     self, Chat, DirectMessagesPage, Envelope, Group, GroupMessagesPage, Me, Message, Reaction,
 };
 
+/// One entry of `GET /v4/read_receipts`. `conversation_id` is a group id or a
+/// `+`-joined DM thread key; the archive stores DMs under the other
+/// participant's user id, so the caller has to map it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadReceipt {
+    pub conversation_id: String,
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ReadReceiptsPage {
+    /// `Option` then unwrapped by the caller rather than a `null_as_default`
+    /// deserializer, because `#[serde(default)]` alone does not survive an
+    /// explicit `"receipts": null` — a shape GroupMe uses freely elsewhere.
+    #[serde(default)]
+    receipts: Option<Vec<ReadReceipt>>,
+}
+
 pub const DEFAULT_BASE_URL: &str = "https://api.groupme.com/v3";
 /// Image upload is not on `api.groupme.com` at all, and takes raw bytes rather
 /// than JSON. A field rather than a literal so tests can point it at wiremock.
@@ -474,6 +493,33 @@ impl GroupMeClient {
             .await?
             .reactions
             .unwrap_or_default())
+    }
+
+    /// `GET /v4/read_receipts` → the entire read-state map in one call.
+    ///
+    /// This is the *only* source of read state. `unread_count`,
+    /// `last_read_message_id` and `last_read_at` exist on the group and chat
+    /// objects but were `null` throughout the capture, so a client that trusts
+    /// them shows every conversation as unread forever.
+    ///
+    /// One request covers every conversation — 216 entries observed — so it is
+    /// cheap enough to refresh each sync cycle rather than per conversation.
+    /// `conversation_id` mixes group ids with `+`-joined DM thread keys.
+    /// Enveloped like the rest of the API — `{"meta":…,"response":{"receipts":…}}`
+    /// — and `/v4/read_receipts` is not one of the documented escapes (§3).
+    /// Decoding the top level instead yields a silent empty list, which is
+    /// indistinguishable from "you have read nothing" and leaves every
+    /// conversation showing unread.
+    pub async fn read_receipts(&self) -> Result<Vec<ReadReceipt>, ApiError> {
+        let url = self.v4_url("/read_receipts");
+        let resp = self
+            .send_with_retry(|| self.authed(self.client.get(&url)))
+            .await?;
+        let env: Envelope<ReadReceiptsPage> = resp
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+        Ok(env.response.and_then(|p| p.receipts).unwrap_or_default())
     }
 
     /// `POST /v4/read_receipts/{conversation_id}` → **202**.

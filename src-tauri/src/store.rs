@@ -329,6 +329,57 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Applies read state from `GET /v4/read_receipts`.
+    ///
+    /// Receipts key DMs by the `+`-joined thread key while this table keys them
+    /// by the other participant's user id, so `my_user_id` is needed to resolve
+    /// the row. A receipt for a conversation we have not archived is ignored
+    /// rather than inserted: a bare id carries no kind, name or timestamps, and a
+    /// half-built row would show up in the sidebar as a blank conversation.
+    ///
+    /// Returns how many rows were actually updated.
+    pub fn apply_read_receipts(
+        &self,
+        receipts: &[(String, Option<String>)],
+        my_user_id: &str,
+    ) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "UPDATE conversations
+                SET last_read_message_id = ?2,
+                    unread_count = CASE
+                        -- Derived, not guessed: if the last read message is the
+                        -- newest we hold, there is nothing unread. Otherwise
+                        -- leave the count unknown (NULL) rather than inventing a
+                        -- number, and let the UI compare ids instead.
+                        WHEN ?2 IS NOT NULL AND last_message_id IS NOT NULL
+                             AND ?2 = last_message_id THEN 0
+                        ELSE NULL
+                    END
+              WHERE id = ?1",
+        )?;
+
+        let mut updated = 0;
+        for (conversation_id, last_read) in receipts {
+            let key = match conversation_id.split_once('+') {
+                Some((a, b)) => {
+                    // A note-to-self thread is "<me>+<me>", so both halves
+                    // matching is not an error.
+                    if a == my_user_id {
+                        b.to_string()
+                    } else if b == my_user_id {
+                        a.to_string()
+                    } else {
+                        // Not our thread; nothing sane to map it to.
+                        continue;
+                    }
+                }
+                None => conversation_id.clone(),
+            };
+            updated += stmt.execute(params![key, last_read])?;
+        }
+        Ok(updated)
+    }
+
     pub fn conversation_count(&self) -> Result<usize> {
         Ok(self
             .conn
@@ -1127,6 +1178,144 @@ mod tests {
             "last_read_message_id was erased by a list sync"
         );
         assert_eq!(c.updated_at, 200, "the rest of the row should still update");
+    }
+
+    /// Receipts key DMs by the `+`-joined thread key; this table keys them by the
+    /// other participant. Getting that mapping wrong silently applies every DM's
+    /// read state to nothing at all.
+    #[test]
+    fn read_receipts_map_onto_groups_and_onto_dms_by_the_other_participant() {
+        const ME: &str = "20000001";
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 100,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        s.upsert_chat(
+            &Chat {
+                updated_at: 200,
+                other_user: OtherUser {
+                    id: "20000002".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        let receipts = vec![
+            (
+                "10000001".to_string(),
+                Some("170000000000000001".to_string()),
+            ),
+            // Our id on the left...
+            (
+                format!("{ME}+20000002"),
+                Some("170000000000000002".to_string()),
+            ),
+            // ...and a thread we are not part of, which must be ignored.
+            (
+                "20000008+20000009".to_string(),
+                Some("170000000000000003".to_string()),
+            ),
+        ];
+        assert_eq!(s.apply_read_receipts(&receipts, ME).unwrap(), 2);
+
+        let by_id: std::collections::HashMap<_, _> = s
+            .list_conversations()
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+        assert_eq!(
+            by_id["10000001"].last_read_message_id.as_deref(),
+            Some("170000000000000001")
+        );
+        assert_eq!(
+            by_id["20000002"].last_read_message_id.as_deref(),
+            Some("170000000000000002"),
+            "a DM receipt must land on the row keyed by the other participant"
+        );
+    }
+
+    /// The ascending-order thread key puts the smaller id first, so the account's
+    /// own id is not reliably on either side.
+    #[test]
+    fn a_dm_receipt_maps_with_our_id_on_either_side() {
+        const ME: &str = "20000009";
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_chat(
+            &Chat {
+                updated_at: 1,
+                other_user: OtherUser {
+                    id: "20000002".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        // "20000002+20000009" — we are on the right this time.
+        let receipts = vec![(
+            format!("20000002+{ME}"),
+            Some("170000000000000004".to_string()),
+        )];
+        assert_eq!(s.apply_read_receipts(&receipts, ME).unwrap(), 1);
+        assert_eq!(
+            s.list_conversations().unwrap()[0]
+                .last_read_message_id
+                .as_deref(),
+            Some("170000000000000004")
+        );
+    }
+
+    /// A receipt naming the newest message we hold means nothing is unread, and
+    /// the UI should not have to infer that. Anything else stays unknown rather
+    /// than inventing a count.
+    #[test]
+    fn a_receipt_for_the_newest_message_resolves_to_zero_unread() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 100,
+                messages: Some(crate::model::GroupPreview {
+                    last_message_id: Some("170000000000000007".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        s.apply_read_receipts(
+            &[(
+                "10000001".to_string(),
+                Some("170000000000000007".to_string()),
+            )],
+            "20000001",
+        )
+        .unwrap();
+        assert_eq!(s.list_conversations().unwrap()[0].unread_count, Some(0));
+
+        // An older receipt leaves the count unknown, not zero.
+        s.apply_read_receipts(
+            &[(
+                "10000001".to_string(),
+                Some("170000000000000003".to_string()),
+            )],
+            "20000001",
+        )
+        .unwrap();
+        assert_eq!(s.list_conversations().unwrap()[0].unread_count, None);
     }
 
     /// A multi-gigabyte v1 archive has to gain the columns in place rather than

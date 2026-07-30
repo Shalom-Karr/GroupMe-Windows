@@ -195,6 +195,66 @@ impl SyncEngine {
         self.finish(report, &ids, stood_down).await
     }
 
+    /// Pulls the whole read-state map and applies it to the archive.
+    ///
+    /// One request covers every conversation, so this runs each cycle rather than
+    /// per conversation. It is deliberately non-fatal: read state is a nicety
+    /// next to the messages themselves, and losing it must never stand the cycle
+    /// down or abort a backfill.
+    ///
+    /// Needs the account's own user id to resolve `+`-joined DM keys onto the
+    /// rows this archive stores under the other participant's id; without it the
+    /// DM half of the map is unusable, so the call is skipped rather than applied
+    /// half-right.
+    ///
+    /// Failures are logged, never added to `SyncReport::errors`. That field is
+    /// what the status panel reports as "sync had errors", and read state is a
+    /// nicety beside the messages themselves — a stale unread dot must not make a
+    /// healthy archive look broken.
+    async fn refresh_read_state(&self) {
+        let receipts = match self.client.read_receipts().await {
+            Ok(r) => r,
+            Err(e) => {
+                log::debug!("read receipts unavailable: {e}");
+                return;
+            }
+        };
+
+        let store = self.store.clone();
+        let me = {
+            let store = store.clone();
+            match tokio::task::spawn_blocking(move || {
+                lock_store(&store).get_meta("account_user_id")
+            })
+            .await
+            {
+                Ok(Ok(Some(id))) => id,
+                _ => {
+                    log::debug!("read receipts skipped: signed-in account not yet known");
+                    return;
+                }
+            }
+        };
+
+        let pairs: Vec<(String, Option<String>)> = receipts
+            .into_iter()
+            .map(|r| (r.conversation_id, r.last_read_message_id))
+            .collect();
+        let total = pairs.len();
+
+        let applied = tokio::task::spawn_blocking(move || {
+            lock_store(&store).apply_read_receipts(&pairs, &me)
+        })
+        .await;
+        match applied {
+            Ok(Ok(n)) => {
+                log::debug!("read receipts: {n} of {total} matched an archived conversation")
+            }
+            Ok(Err(e)) => log::warn!("applying read receipts: {e:#}"),
+            Err(e) => log::warn!("applying read receipts: {e}"),
+        }
+    }
+
     /// The body of a cycle. Returns true when it stood down — a rejected token,
     /// or a 429 the client's own retries could not ride out — which is the one
     /// outcome the caller must not answer by coming straight back round.
@@ -262,6 +322,9 @@ impl SyncEngine {
                 }
             }
         }
+
+        self.pace().await;
+        self.refresh_read_state().await;
 
         // Read the list back from the archive rather than from the two API
         // responses: it is already ordered most-recent-first, so the cycle

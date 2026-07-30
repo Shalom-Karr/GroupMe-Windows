@@ -2153,14 +2153,24 @@
 
   async function openConversation(cid, anchorId) {
     var c = state.byId[cid];
+    // The archive keys a DM by the other participant's user id, so its id is
+    // shape-identical to a group id and `kind` is the only way to tell. Rust
+    // needs it to pick the channel: guessing subscribed DMs to /group/{user_id},
+    // which GroupMe rejects as an auth failure and which killed the whole
+    // realtime session on the first DM opened.
+    var kind = (c && c.kind) || (String(cid).indexOf("+") >= 0 ? "dm" : "group");
     // Typing notices are published per-conversation, so they only arrive for a
     // thread the socket is subscribed to. Messages come over the account
     // channel regardless, so this is best-effort and never gates the open.
     if (HAS_IPC && cid !== state.active) {
-      call("client_watch_conversation", { conversationId: cid, previousId: state.active || null });
+      call("client_watch_conversation", {
+        conversationId: cid,
+        kind: kind,
+        previousId: state.active || null,
+      });
     }
     state.active = cid;
-    state.activeKind = (c && c.kind) || (String(cid).indexOf("+") >= 0 ? "dm" : "group");
+    state.activeKind = kind;
     state.cursor = null;
     state.hasMore = true;
     state.loading = false;
@@ -3066,7 +3076,7 @@
     var now = Date.now();
     if (now - lastTypingAt < TYPING_EVERY_MS) return;
     lastTypingAt = now;
-    call("client_typing", { conversationId: state.active });
+    call("client_typing", { conversationId: state.active, kind: state.activeKind || "group" });
   }
 
   input.addEventListener("input", function () {

@@ -25,7 +25,7 @@ use tokio::sync::RwLock;
 
 use crate::api::{ApiError, GroupMeClient};
 use crate::commands::SharedStore;
-use crate::model::{Message, Reaction, SystemEvent};
+use crate::model::{ConversationKind, Message, Reaction, SystemEvent};
 use crate::store::Store;
 
 /// An **async** lock, unlike [`SharedStore`]: the guard is held across the HTTP
@@ -482,12 +482,20 @@ pub async fn client_upload_image(
 /// notices, which are published per-conversation and are invisible without it.
 /// Idempotent and safe while the socket is down: the subscription set is
 /// replayed on reconnect.
+///
+/// `kind` is required, not inferred. The archive keys a DM by the *other
+/// participant's* user id, so a DM id is shape-identical to a group id;
+/// guessing subscribed DMs to `/group/{user_id}`, a channel the account does
+/// not own, and GroupMe answered by failing authentication and tearing down the
+/// whole session on the first DM opened.
 #[tauri::command]
 pub async fn client_watch_conversation(
     realtime: State<'_, crate::realtime::RealtimeSlot>,
     conversation_id: String,
+    kind: String,
     previous_id: Option<String>,
 ) -> CmdResult<bool> {
+    let kind = parse_kind(&kind)?;
     let guard = realtime.lock().await;
     let Some(rt) = guard.as_ref() else {
         // No socket yet. Not an error: polling still delivers messages, so the
@@ -497,9 +505,9 @@ pub async fn client_watch_conversation(
     // Dropping the old subscription as the user leaves keeps the set bounded;
     // a long session would otherwise accumulate every thread ever opened.
     if let Some(prev) = previous_id.as_deref().filter(|p| *p != conversation_id) {
-        rt.unwatch_group(prev);
+        rt.unwatch_conversation(prev);
     }
-    rt.watch_group(&conversation_id);
+    rt.watch_conversation(&conversation_id, kind);
     Ok(rt.is_connected())
 }
 
@@ -509,11 +517,21 @@ pub async fn client_watch_conversation(
 pub async fn client_typing(
     realtime: State<'_, crate::realtime::RealtimeSlot>,
     conversation_id: String,
+    kind: String,
 ) -> CmdResult<()> {
+    let kind = parse_kind(&kind)?;
     if let Some(rt) = realtime.lock().await.as_ref() {
-        rt.send_typing(&conversation_id);
+        rt.send_typing(&conversation_id, kind);
     }
     Ok(())
+}
+
+/// Rejects rather than defaulting. Defaulting to `Group` is what produced the
+/// wrong channel in the first place, and a silently wrong subscription costs the
+/// entire realtime session.
+fn parse_kind(kind: &str) -> Result<ConversationKind, String> {
+    ConversationKind::parse(kind)
+        .ok_or_else(|| format!("unknown conversation kind {kind:?} — expected \"group\" or \"dm\""))
 }
 
 pub const UI_WEB: &str = "web";

@@ -50,12 +50,15 @@
 //! UI and the archive never disagree and a frame that lands while the polling
 //! worker is idle is not lost.
 //!
-//! `watch_group` also accepts a DM thread key (`"{lo}+{hi}"`); it subscribes to
+//! `watch_conversation` takes the conversation's kind alongside its id, because
+//! the archive stores a DM under the *other participant's* user id — so a DM id
+//! is shape-identical to a group id and cannot be told apart. It accepts either
+//! that stored form or the composite `"{lo}+{hi}"` thread key, and subscribes to
 //! `/direct_message/{lo}_{hi}`. Messages themselves arrive on the account's own
 //! `/user/{id}` channel regardless, so a conversation subscription only adds
 //! that thread's typing notices and read receipts.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -94,11 +97,13 @@ const PING_EVERY: Duration = Duration::from_secs(45);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_CEILING: Duration = Duration::from_secs(300);
 
+/// Each variant carries the conversation's kind because the channel name cannot
+/// be derived from a stored id alone — see `conversation_channel`.
 #[derive(Debug)]
 enum Command {
-    Watch(String),
+    Watch(String, ConversationKind),
     Unwatch(String),
-    Typing(String),
+    Typing(String, ConversationKind),
 }
 
 /// The live worker, held in Tauri managed state. `None` until a token has been
@@ -129,19 +134,23 @@ impl Clone for RealtimeHandle {
 }
 
 impl RealtimeHandle {
-    /// Subscribe to a conversation's channel — a group id, or a DM thread key
-    /// `"{lo}+{hi}"`. Idempotent, and safe while offline: the set is replayed on
-    /// every reconnect.
-    pub fn watch_group(&self, group_id: &str) {
-        self.send(Command::Watch(group_id.to_string()));
+    /// Subscribe to a conversation's channel. Idempotent, and safe while
+    /// offline: the set is replayed on every reconnect.
+    ///
+    /// `kind` is required rather than inferred. A DM is stored under the other
+    /// participant's user id, so its id looks exactly like a group id, and
+    /// guessing wrong subscribes to a channel the account does not own — which
+    /// GroupMe answers by failing authentication and dropping the session.
+    pub fn watch_conversation(&self, conversation_id: &str, kind: ConversationKind) {
+        self.send(Command::Watch(conversation_id.to_string(), kind));
     }
 
-    pub fn unwatch_group(&self, group_id: &str) {
-        self.send(Command::Unwatch(group_id.to_string()));
+    pub fn unwatch_conversation(&self, conversation_id: &str) {
+        self.send(Command::Unwatch(conversation_id.to_string()));
     }
 
-    pub fn send_typing(&self, conversation_id: &str) {
-        self.send(Command::Typing(conversation_id.to_string()));
+    pub fn send_typing(&self, conversation_id: &str, kind: ConversationKind) {
+        self.send(Command::Typing(conversation_id.to_string(), kind));
     }
 
     pub fn is_connected(&self) -> bool {
@@ -224,7 +233,7 @@ impl Status {
 
 impl Worker {
     async fn run(self, mut rx: mpsc::UnboundedReceiver<Command>) {
-        let mut watched: BTreeSet<String> = BTreeSet::new();
+        let mut watched: BTreeMap<String, ConversationKind> = BTreeMap::new();
         let mut attempt: u32 = 0;
 
         loop {
@@ -276,7 +285,7 @@ impl Worker {
     async fn wait_out_backoff(
         &self,
         rx: &mut mpsc::UnboundedReceiver<Command>,
-        watched: &mut BTreeSet<String>,
+        watched: &mut BTreeMap<String, ConversationKind>,
         delay: Duration,
     ) -> bool {
         let deadline = tokio::time::Instant::now() + delay;
@@ -287,8 +296,8 @@ impl Worker {
                     None => return false,
                     // Typing is discarded rather than queued: by the time the
                     // socket is back the user has long stopped typing.
-                    Some(Command::Typing(_)) => {}
-                    Some(Command::Watch(id)) => { watched.insert(id); }
+                    Some(Command::Typing(..)) => {}
+                    Some(Command::Watch(id, kind)) => { watched.insert(id, kind); }
                     Some(Command::Unwatch(id)) => { watched.remove(&id); }
                 },
             }
@@ -299,7 +308,7 @@ impl Worker {
     async fn session(
         &self,
         rx: &mut mpsc::UnboundedReceiver<Command>,
-        watched: &mut BTreeSet<String>,
+        watched: &mut BTreeMap<String, ConversationKind>,
     ) -> Result<(), SessionError> {
         let (ws, _response) = tokio_tungstenite::connect_async(FAYE_URL)
             .await
@@ -325,7 +334,10 @@ impl Worker {
             self.frames
                 .subscribe(&hs.client_id, &user_channel(&self.user_id)),
         );
-        for channel in watched.iter().filter_map(|id| conversation_channel(id)) {
+        for channel in watched
+            .iter()
+            .filter_map(|(id, kind)| conversation_channel(id, *kind, &self.user_id))
+        {
             batch.push(self.frames.subscribe(&hs.client_id, &channel));
         }
         self.send_frames(&mut sink, batch).await?;
@@ -370,24 +382,28 @@ impl Worker {
 
                 cmd = rx.recv() => match cmd {
                     None => return Err(SessionError::Shutdown),
-                    Some(Command::Watch(id)) => {
-                        if let Some(channel) = conversation_channel(&id) {
-                            if watched.insert(id) {
+                    Some(Command::Watch(id, kind)) => {
+                        if let Some(channel) = conversation_channel(&id, kind, &self.user_id) {
+                            if watched.insert(id, kind).is_none() {
                                 let f = self.frames.subscribe(&hs.client_id, &channel);
                                 self.send_frames(&mut sink, vec![f]).await?;
                             }
                         }
                     }
                     Some(Command::Unwatch(id)) => {
-                        if let Some(channel) = conversation_channel(&id) {
-                            if watched.remove(&id) {
+                        if let Some(kind) = watched.remove(&id) {
+                            if let Some(channel) =
+                                conversation_channel(&id, kind, &self.user_id)
+                            {
                                 let f = self.frames.unsubscribe(&hs.client_id, &channel);
                                 self.send_frames(&mut sink, vec![f]).await?;
                             }
                         }
                     }
-                    Some(Command::Typing(conversation_id)) => {
-                        if let Some(channel) = conversation_channel(&conversation_id) {
+                    Some(Command::Typing(conversation_id, kind)) => {
+                        if let Some(channel) =
+                            conversation_channel(&conversation_id, kind, &self.user_id)
+                        {
                             let f = self.frames.publish(
                                 &hs.client_id,
                                 &channel,
@@ -536,7 +552,7 @@ impl Worker {
     async fn handle_text(
         &self,
         text: &str,
-        watched: &mut BTreeSet<String>,
+        watched: &mut BTreeMap<String, ConversationKind>,
     ) -> Result<Flow, SessionError> {
         let mut flow = Flow::Idle;
 
@@ -1015,14 +1031,37 @@ fn string_id(v: Option<&Value>) -> Option<String> {
 /// The channel a conversation is subscribed on. Groups are `/group/{id}` (§9);
 /// a DM thread is `/direct_message/{lo}_{hi}` — the same two ids as the
 /// `chat_id`, joined with `_` instead of `+`.
-fn conversation_channel(conversation_id: &str) -> Option<String> {
+///
+/// The kind has to be passed in; it cannot be inferred from the id. **The
+/// archive stores a DM under the *other participant's* user id**, not under the
+/// composite `"{a}+{b}"` thread key — `upsert_chat` uses `other_user.id` as the
+/// primary key. So a DM id is a bare number, indistinguishable in shape from a
+/// group id, and guessing by looking for a `+` silently classified every DM as a
+/// group. That produced a subscribe to `/group/{some_user_id}` — a channel the
+/// account does not own — which GroupMe answers with
+/// `Access token authentication failed`, killing the whole realtime session on
+/// the first DM opened.
+///
+/// Both DM forms are accepted, since the composite key is what arrives on frames.
+fn conversation_channel(
+    conversation_id: &str,
+    kind: ConversationKind,
+    my_user_id: &str,
+) -> Option<String> {
     if conversation_id.is_empty() {
         return None;
     }
-    Some(if conversation_id.contains('+') {
-        format!("/direct_message/{}", conversation_id.replace('+', "_"))
-    } else {
-        format!("/group/{conversation_id}")
+    Some(match kind {
+        ConversationKind::Group => format!("/group/{conversation_id}"),
+        ConversationKind::Dm => {
+            let thread = if conversation_id.contains('+') {
+                conversation_id.to_string()
+            } else {
+                // Stored form: the other participant. Rebuild the thread key.
+                dm_conversation_id(my_user_id, conversation_id)
+            };
+            format!("/direct_message/{}", thread.replace('+', "_"))
+        }
     })
 }
 
@@ -1414,16 +1453,31 @@ mod tests {
 
     #[test]
     fn channel_names_round_trip_for_both_conversation_kinds() {
+        const ME: &str = "20000001";
         assert_eq!(
-            conversation_channel("10000001").as_deref(),
+            conversation_channel("10000001", ConversationKind::Group, ME).as_deref(),
             Some("/group/10000001")
         );
         // The DM channel joins the two ids with `_`, where the chat_id uses `+`.
         assert_eq!(
-            conversation_channel("20000001+20000002").as_deref(),
+            conversation_channel("20000001+20000002", ConversationKind::Dm, ME).as_deref(),
             Some("/direct_message/20000001_20000002")
         );
-        assert_eq!(conversation_channel(""), None);
+        // The form the archive actually stores: a DM keyed by the *other*
+        // participant. Treating this as a group subscribed to
+        // `/group/20000002`, which GroupMe rejects as an auth failure and which
+        // tore down the session on the first DM opened.
+        assert_eq!(
+            conversation_channel("20000002", ConversationKind::Dm, ME).as_deref(),
+            Some("/direct_message/20000001_20000002"),
+            "a DM stored under the other participant's id must still resolve to its thread channel"
+        );
+        // Ordering is numeric, and our id is not reliably the smaller one.
+        assert_eq!(
+            conversation_channel("999", ConversationKind::Dm, "20000001").as_deref(),
+            Some("/direct_message/999_20000001")
+        );
+        assert_eq!(conversation_channel("", ConversationKind::Group, ME), None);
         assert_eq!(user_channel("20000001"), "/user/20000001");
 
         assert_eq!(
@@ -1668,9 +1722,9 @@ mod tests {
                 connected: Arc::new(AtomicBool::new(false)),
             }),
         };
-        handle.watch_group("10000001");
-        handle.unwatch_group("10000001");
-        handle.send_typing("10000001");
+        handle.watch_conversation("10000001", ConversationKind::Group);
+        handle.unwatch_conversation("10000001");
+        handle.send_typing("10000001", ConversationKind::Group);
         assert!(!handle.is_connected());
     }
 }
