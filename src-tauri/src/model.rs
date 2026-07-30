@@ -565,6 +565,13 @@ pub struct Conversation {
     /// tell us, and the client falls back to its local heuristic.
     pub unread_count: Option<i64>,
     pub last_read_message_id: Option<String>,
+    /// Local pin ordering, owned entirely by this app (GroupMe's own
+    /// `/v4/pinned_conversations` is not synced). `None` is unpinned; a smaller
+    /// rank sorts higher. Never round-tripped through the API.
+    pub pin_rank: Option<i64>,
+    /// Local mute flag. Purely a notification suppressor — it does not touch
+    /// GroupMe's own server-side membership mute.
+    pub muted: bool,
 }
 
 /// GroupMe IDs are decimal strings too large for f64 but comfortably inside

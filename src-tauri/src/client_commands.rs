@@ -124,6 +124,50 @@ async fn read_meta(store: &SharedStore, key: &'static str) -> CmdResult<Option<S
     }
 }
 
+/// A local store write whose failure the caller *does* want to see.
+///
+/// Unlike [`mirror_to_archive`], which swallows errors because the server has
+/// already accepted a mutation, these commands are the whole operation — a pin
+/// or mute that failed to persist should surface so the UI does not show a state
+/// the archive never recorded. The guard lives entirely inside the closure so it
+/// is never held across an `.await`.
+async fn write_store<F>(store: &SharedStore, context: &'static str, f: F) -> CmdResult<()>
+where
+    F: FnOnce(&mut Store) -> anyhow::Result<()> + Send + 'static,
+{
+    let store = store.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(fail(context, format!("{e:#}"))),
+        Err(e) => Err(fail(context, e)),
+    }
+}
+
+/// Reads a conversation's stored kind on the blocking pool.
+async fn read_conversation_kind(
+    store: &SharedStore,
+    conversation_id: String,
+) -> CmdResult<Option<ConversationKind>> {
+    let store = store.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+        guard.conversation_kind(&conversation_id)
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(fail("reading the conversation", format!("{e:#}"))),
+        Err(e) => Err(fail("reading the conversation", e)),
+    }
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -260,6 +304,75 @@ fn route(kind: &str, conversation_id: &str) -> Result<&'static str, String> {
         other => Err(format!(
             "unknown conversation kind {other:?} for {conversation_id:?} — expected \"group\" or \"dm\""
         )),
+    }
+}
+
+/// The composite DM thread key `"{lo}+{hi}"`, sorted **numerically** ascending.
+///
+/// This is the id every DM HTTP path wants — including
+/// `POST /v3/messages/{conversation_id}/{message_id}/like` — while the archive
+/// keys a DM by the *other participant's* bare user id. Sorting the two ids as
+/// strings produces the wrong key whenever they differ in length, so the compare
+/// is on the parsed integer, mirroring `realtime::dm_conversation_id`.
+fn dm_thread_key(a: &str, b: &str) -> String {
+    use crate::model::id_sort_key;
+    let (lo, hi) = if id_sort_key(a) <= id_sort_key(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    format!("{lo}+{hi}")
+}
+
+/// The signed-in account's membership id within a group-detail response.
+///
+/// Leaving a group is addressed by the *membership* id, not the user id
+/// (docs §7.1/§7.3), and that id only appears alongside the members. `user_id`
+/// is a string in this payload; `id` (the membership) can arrive as a string or,
+/// defensively, a number — both normalise to a string.
+fn membership_id_of(group: &Value, my_user_id: &str) -> Option<String> {
+    group.get("members")?.as_array()?.iter().find_map(|m| {
+        let uid = m.get("user_id").and_then(Value::as_str)?;
+        if uid != my_user_id {
+            return None;
+        }
+        match m.get("id")? {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// Resolves a conversation id to the form the reaction endpoint expects.
+///
+/// A group id is already correct. A DM, though, is stored under the other
+/// participant's bare user id, while `POST /v3/messages/{conversation_id}/…/like`
+/// wants the composite `"{lo}+{hi}"` thread key — passing the bare id makes
+/// GroupMe answer `404 not found`, the same DM-key mismatch that once broke send
+/// and mark-read. The kind is read from the store rather than taken from the
+/// caller, so the `client_react`/`client_unreact` contract is unchanged.
+async fn resolve_reaction_conversation(
+    store: &SharedStore,
+    conversation_id: &str,
+) -> CmdResult<String> {
+    // Already the composite thread key (an arriving realtime/read-receipt id):
+    // nothing to resolve.
+    if conversation_id.contains('+') {
+        return Ok(conversation_id.to_string());
+    }
+    match read_conversation_kind(store, conversation_id.to_string()).await? {
+        Some(ConversationKind::Dm) => {
+            let me = read_meta(store, "account_user_id").await?.ok_or_else(|| {
+                "cannot react in a direct message until the signed-in account is known — \
+                 let one sync finish first"
+                    .to_string()
+            })?;
+            Ok(dm_thread_key(&me, conversation_id))
+        }
+        // A group (the id is already the right key) or a conversation we do not
+        // hold (nothing better to do than pass it through unchanged).
+        _ => Ok(conversation_id.to_string()),
     }
 }
 
@@ -429,37 +542,54 @@ pub async fn client_delete_message(
 }
 
 /// `code` is the Unicode character for a reaction, or `None` for a plain like.
+///
+/// The conversation id is resolved to the reaction endpoint's expected form
+/// first (see [`resolve_reaction_conversation`]): a DM is stored under the other
+/// participant's bare user id, but `POST /v3/messages/{conversation_id}/…/like`
+/// wants the composite `"{lo}+{hi}"` thread key, and the bare id 404s.
 #[tauri::command]
 pub async fn client_react(
+    store: State<'_, SharedStore>,
     client: State<'_, SharedClient>,
     conversation_id: String,
     message_id: String,
     code: Option<String>,
 ) -> CmdResult<Vec<Reaction>> {
+    let api_conversation_id =
+        resolve_reaction_conversation(store.inner(), &conversation_id).await?;
     let guard = client.read().await;
     let Some(api) = guard.as_ref() else {
         return Err(NOT_SIGNED_IN.into());
     };
-    api.like_message(&conversation_id, &message_id, code.as_deref())
+    api.like_message(&api_conversation_id, &message_id, code.as_deref())
         .await
         .map_err(|e| map_api("adding the reaction", e))
 }
 
 #[tauri::command]
 pub async fn client_unreact(
+    store: State<'_, SharedStore>,
     client: State<'_, SharedClient>,
     conversation_id: String,
     message_id: String,
 ) -> CmdResult<Vec<Reaction>> {
+    let api_conversation_id =
+        resolve_reaction_conversation(store.inner(), &conversation_id).await?;
     let guard = client.read().await;
     let Some(api) = guard.as_ref() else {
         return Err(NOT_SIGNED_IN.into());
     };
-    api.unlike_message(&conversation_id, &message_id)
+    api.unlike_message(&api_conversation_id, &message_id)
         .await
         .map_err(|e| map_api("removing the reaction", e))
 }
 
+/// Best-effort, and never surfaced. Unlike a send or a reaction, a read receipt
+/// is fired automatically when a thread is opened, not asked for — so its
+/// failure must not become a user-facing error. It legitimately fails for
+/// reasons that are not problems: GroupMe answers `403 "not a member"` for a
+/// group the user has left but still has archived, and the whole write is
+/// blocked on a filtered network. Log it and return `Ok` either way.
 #[tauri::command]
 pub async fn client_mark_read(
     client: State<'_, SharedClient>,
@@ -468,11 +598,13 @@ pub async fn client_mark_read(
 ) -> CmdResult<()> {
     let guard = client.read().await;
     let Some(api) = guard.as_ref() else {
-        return Err(NOT_SIGNED_IN.into());
+        // Not even an error worth returning: nothing to mark read before sign-in.
+        return Ok(());
     };
-    api.mark_read(&conversation_id, &last_read_message_id)
-        .await
-        .map_err(|e| map_api("marking the conversation read", e))
+    if let Err(e) = api.mark_read(&conversation_id, &last_read_message_id).await {
+        log::debug!("marking {conversation_id} read (ignored): {e}");
+    }
+    Ok(())
 }
 
 /// Returns the `i.groupme.com` URL to put in an `image` attachment.
@@ -582,6 +714,133 @@ pub async fn client_set_ui_preference(store: State<'_, SharedStore>, ui: String)
     Ok(())
 }
 
+// ----------------------------------------------- local pins, ordering, mute
+
+/// Set (`Some`) or clear (`None`) a conversation's local pin rank. Store-backed
+/// and works offline — this is deliberately *not* GroupMe's own pinned list.
+#[tauri::command]
+pub async fn client_set_pin(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+    rank: Option<i64>,
+) -> CmdResult<()> {
+    write_store(store.inner(), "pinning the conversation", move |s| {
+        s.set_pin(&conversation_id, rank)
+    })
+    .await
+}
+
+/// Assign pin ranks `0..n` to `ordered_ids` in order. Conversations not listed
+/// keep their existing pin state.
+#[tauri::command]
+pub async fn client_reorder_pins(
+    store: State<'_, SharedStore>,
+    ordered_ids: Vec<String>,
+) -> CmdResult<()> {
+    write_store(store.inner(), "reordering the pins", move |s| {
+        s.reorder_pins(&ordered_ids)
+    })
+    .await
+}
+
+/// Set the local mute flag. A muted conversation raises no tray notification
+/// (see `tray::notify_message`); it does not touch GroupMe's own mute.
+#[tauri::command]
+pub async fn client_set_mute(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+    muted: bool,
+) -> CmdResult<()> {
+    write_store(store.inner(), "muting the conversation", move |s| {
+        s.set_mute(&conversation_id, muted)
+    })
+    .await
+}
+
+// ----------------------------------------------------- group settings (API)
+
+/// `GET /v3/groups/{id}?include=members` → the raw group object with members, for
+/// a settings panel. Routed through the client's fallback-aware GET.
+#[tauri::command]
+pub async fn client_group_detail(
+    client: State<'_, SharedClient>,
+    group_id: String,
+) -> CmdResult<Value> {
+    let guard = client.read().await;
+    let Some(api) = guard.as_ref() else {
+        return Err(NOT_SIGNED_IN.into());
+    };
+    api.group_detail(&group_id)
+        .await
+        .map_err(|e| map_api("loading the group", e))
+}
+
+/// Leave a group. Resolves the signed-in account's *membership* id from the
+/// group detail first, because that — not the user id — is what the captured
+/// leave endpoint (`.../memberships/{membership_id}/destroy`, docs §7.3) wants.
+#[tauri::command]
+pub async fn client_leave_group(
+    store: State<'_, SharedStore>,
+    client: State<'_, SharedClient>,
+    group_id: String,
+) -> CmdResult<()> {
+    let me = read_meta(store.inner(), "account_user_id")
+        .await?
+        .ok_or_else(|| {
+            "cannot leave a group until the signed-in account is known — \
+             let one sync finish first"
+                .to_string()
+        })?;
+
+    let guard = client.read().await;
+    let Some(api) = guard.as_ref() else {
+        return Err(NOT_SIGNED_IN.into());
+    };
+    let detail = api
+        .group_detail(&group_id)
+        .await
+        .map_err(|e| map_api("leaving the group", e))?;
+    let membership_id = membership_id_of(&detail, &me)
+        .ok_or_else(|| "you do not appear to be a member of this group".to_string())?;
+    api.leave_group(&group_id, &membership_id)
+        .await
+        .map_err(|e| map_api("leaving the group", e))
+}
+
+/// Block (`blocked = true`) or unblock a user via the captured `/v3/blocks`
+/// endpoints (docs §7.5). `user` is the signed-in account; `otherUser` is the
+/// target.
+#[tauri::command]
+pub async fn client_set_block(
+    store: State<'_, SharedStore>,
+    client: State<'_, SharedClient>,
+    user_id: String,
+    blocked: bool,
+) -> CmdResult<()> {
+    let me = read_meta(store.inner(), "account_user_id")
+        .await?
+        .ok_or_else(|| {
+            "cannot change block state until the signed-in account is known — \
+             let one sync finish first"
+                .to_string()
+        })?;
+
+    let guard = client.read().await;
+    let Some(api) = guard.as_ref() else {
+        return Err(NOT_SIGNED_IN.into());
+    };
+    api.set_block(&me, &user_id, blocked).await.map_err(|e| {
+        map_api(
+            if blocked {
+                "blocking the user"
+            } else {
+                "unblocking the user"
+            },
+            e,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,9 +883,10 @@ mod tests {
             found += 1;
         }
         assert_eq!(
-            found, 11,
-            "expected exactly the eleven client commands \
-             (7 mutations + 2 realtime bridges + 2 ui-preference)"
+            found, 17,
+            "expected exactly the seventeen client commands \
+             (7 message mutations + 2 realtime bridges + 2 ui-preference \
+              + 3 local pin/mute + 3 group-settings/leave/block)"
         );
     }
 
@@ -825,5 +1085,89 @@ mod tests {
         // v4 hyphenated: 8-4-4-4-12.
         assert_eq!(a.len(), 36);
         assert_eq!(a.matches('-').count(), 4);
+    }
+
+    // ------------------------------------------------- reaction DM-key routing
+
+    #[test]
+    fn a_dm_reaction_key_is_the_composite_thread_key_regardless_of_order() {
+        // Numeric ascending: THEM (10000001) sorts below ME (20000001), so the
+        // signed-in account lands on either side depending on the argument order.
+        assert_eq!(dm_thread_key(ME, THEM), DM_KEY);
+        assert_eq!(dm_thread_key(THEM, ME), DM_KEY);
+        // Differing lengths must sort numerically, not lexically.
+        assert_eq!(dm_thread_key("20000001", "9999999"), "9999999+20000001");
+        assert_eq!(dm_thread_key("9999999", "20000001"), "9999999+20000001");
+    }
+
+    #[test]
+    fn membership_id_of_finds_the_signed_in_accounts_membership() {
+        let group = json!({
+            "id": THEM,
+            "members": [
+                {"id": "1000000002", "user_id": "40000000", "nickname": "Other"},
+                {"id": "1000000001", "user_id": ME, "nickname": "Me"}
+            ]
+        });
+        assert_eq!(membership_id_of(&group, ME).as_deref(), Some("1000000001"));
+        // Not a member -> None, so leaving reports it rather than acting on a
+        // stranger's membership.
+        assert!(membership_id_of(&group, "50000000").is_none());
+        // A numeric membership id normalises to a string.
+        let numeric = json!({"members": [{"id": 1000000003i64, "user_id": ME}]});
+        assert_eq!(
+            membership_id_of(&numeric, ME).as_deref(),
+            Some("1000000003")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dm_reaction_resolves_to_the_composite_key_while_a_group_passes_through() {
+        let store: SharedStore =
+            std::sync::Arc::new(std::sync::Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.set_meta("account_user_id", ME).unwrap();
+            s.upsert_group(
+                &crate::model::Group {
+                    id: "10000002".into(),
+                    updated_at: 1,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+            // A DM is keyed by the other participant's bare user id.
+            s.upsert_chat(
+                &crate::model::Chat {
+                    updated_at: 1,
+                    other_user: crate::model::OtherUser {
+                        id: THEM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        }
+
+        // A group id is already the reaction endpoint's key.
+        assert_eq!(
+            resolve_reaction_conversation(&store, "10000002")
+                .await
+                .unwrap(),
+            "10000002"
+        );
+        // A DM stored under the other participant resolves to the composite key.
+        assert_eq!(
+            resolve_reaction_conversation(&store, THEM).await.unwrap(),
+            DM_KEY
+        );
+        // An already-composite id is left untouched.
+        assert_eq!(
+            resolve_reaction_conversation(&store, DM_KEY).await.unwrap(),
+            DM_KEY
+        );
     }
 }

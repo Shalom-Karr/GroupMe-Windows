@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "netproxy",
+  "description": "The hidden web.groupme.com webview used only as an API fetch proxy when a network filter blocks the app's direct API calls (see proxy.rs). Like the main remote surface it is third-party code on a remote origin, so it gets nothing but the event channel — no filesystem, shell, window, or archive commands. It only relays fetch requests it is handed and returns the responses. Created lazily, so on an unfiltered network this window and capability never come into play.",
+  "windows": ["netproxy"],
+  "remote": {
+    "urls": ["https://web.groupme.com/*"]
+  },
+  "permissions": [
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

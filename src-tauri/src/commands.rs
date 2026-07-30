@@ -70,6 +70,12 @@ pub struct ArchiveStats {
     pub messages: i64,
     pub last_sync_at: Option<i64>,
     pub account_name: Option<String>,
+    /// Groups vs DMs, split out so the panel can report each on its own — a
+    /// filtered network can leave groups empty while DMs are complete.
+    pub groups: usize,
+    pub dms: usize,
+    pub group_messages: i64,
+    pub dm_messages: i64,
 }
 
 #[tauri::command]
@@ -116,10 +122,13 @@ pub async fn archive_messages(
     .await
 }
 
+/// Full-text search. `conversation_id`, when present, scopes the search to that
+/// one conversation; `None` searches the whole archive.
 #[tauri::command]
 pub async fn archive_search(
     store: State<'_, SharedStore>,
     query: String,
+    conversation_id: Option<String>,
     limit: Option<i64>,
 ) -> CmdResult<Vec<SearchHit>> {
     let query = query.trim();
@@ -132,7 +141,22 @@ pub async fn archive_search(
     // as a phrase so anything they type is searchable rather than a hard error.
     let phrase = format!("\"{}\"", query.replace('"', ""));
     read_store(store.inner(), "searching archive", move |s| {
-        s.search(&phrase, limit)
+        s.search_scoped(&phrase, conversation_id.as_deref(), limit)
+    })
+    .await
+}
+
+/// The id of the newest message in a conversation at or before `before_unix`,
+/// for a "jump to date" picker. Returns the id as a **string** — GroupMe ids
+/// exceed 2^53 and must never round-trip through a JS number.
+#[tauri::command]
+pub async fn archive_message_near_date(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+    before_unix: i64,
+) -> CmdResult<Option<String>> {
+    read_store(store.inner(), "finding a message by date", move |s| {
+        s.message_near_date(&conversation_id, before_unix)
     })
     .await
 }
@@ -157,6 +181,7 @@ pub async fn archive_media_path(
 pub async fn archive_stats(store: State<'_, SharedStore>) -> CmdResult<ArchiveStats> {
     // One hop onto the blocking pool for all four reads, not four.
     read_store(store.inner(), "loading archive stats", |s| {
+        let kinds = s.counts_by_kind().context("counting by kind")?;
         Ok(ArchiveStats {
             // A COUNT, not `list_conversations().len()`: the latter selects
             // every column of every row purely to throw them away.
@@ -167,6 +192,10 @@ pub async fn archive_stats(store: State<'_, SharedStore>) -> CmdResult<ArchiveSt
                 .context("reading sync time")?
                 .and_then(|v| v.parse::<i64>().ok()),
             account_name: s.get_meta("account_name").context("reading account")?,
+            groups: kinds.groups,
+            dms: kinds.dms,
+            group_messages: kinds.group_messages,
+            dm_messages: kinds.dm_messages,
         })
     })
     .await
@@ -229,7 +258,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 5, "expected exactly the five archive readers");
+        assert_eq!(found, 6, "expected exactly the six archive readers");
     }
 
     #[test]

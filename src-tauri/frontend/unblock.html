@@ -1,0 +1,78 @@
+<meta charset="utf-8" />
+<title>Allow GroupMe API through your content filter</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #100e0c; color: #f1ece1;
+    font: 15px/1.6 Corbel, Candara, "Segoe UI", sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 2rem;
+  }
+  .card { max-width: 34rem; }
+  h1 {
+    font: 600 1.5rem/1.2 "Sitka Heading", Constantia, Georgia, serif;
+    margin: 0 0 .75rem; letter-spacing: -.01em;
+  }
+  p { color: #cfc7b8; margin: 0 0 1rem; }
+  ol { color: #cfc7b8; margin: 0 0 1.25rem; padding-left: 1.25rem; }
+  li { margin: .3rem 0; }
+  code { font-family: "Cascadia Mono", Consolas, monospace; color: #e2603f; }
+  button {
+    font: inherit; font-weight: 600; padding: .55rem 1.1rem; border-radius: 6px;
+    border: 1px solid #e2603f; background: #e2603f; color: #100e0c; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  .status {
+    margin-top: 1.25rem; padding: .8rem 1rem; border-radius: 6px;
+    border-left: 3px solid #302a22; background: #191611; color: #cfc7b8;
+    font-family: "Cascadia Mono", Consolas, monospace; font-size: .85rem; white-space: pre-wrap;
+  }
+  .status.blocked { border-left-color: #d4a24c; }
+  .status.ok { border-left-color: #4fb3a4; color: #cfeee6; }
+</style>
+
+<div class="card">
+  <h1>Allow the GroupMe API through your filter</h1>
+  <p>
+    This sends a request to <code>api.groupme.com</code> <b>from inside this app</b>,
+    so your content filter sees the request coming from the app rather than a browser.
+  </p>
+  <ol>
+    <li>Click <b>Send request</b> below.</li>
+    <li>If your filter blocks it, approve / request access for <code>api.groupme.com</code> in your filter.</li>
+    <li>Come back and click <b>Send request</b> again until it goes through.</li>
+  </ol>
+  <button id="go" type="button">Send request</button>
+  <div class="status" id="status">Ready.</div>
+</div>
+
+<script>
+  var statusEl = document.getElementById("status");
+  var URL = "https://api.groupme.com/v3/groups";
+
+  function set(kind, msg) {
+    statusEl.className = "status" + (kind ? " " + kind : "");
+    statusEl.textContent = msg;
+  }
+
+  async function fire() {
+    set("", "Sending a request to api.groupme.com from the app …");
+    // no-cors so the request is genuinely put on the wire for the filter to
+    // see and act on. The response is opaque and resolves even on a filter
+    // redirect, so this cannot reliably tell "blocked" from "allowed" — which
+    // is why the message below stays neutral. Triggering the filter is the job;
+    // the block/approval happens in the filter's own UI, not here.
+    try { await fetch(URL, { mode: "no-cors", cache: "no-store" }); } catch (e) {}
+    set("blocked",
+      "Request sent to api.groupme.com from inside the app.\n\n" +
+      "If your content filter blocked it, approve / request access for\n" +
+      "api.groupme.com in your filter now, then click Send request again.\n\n" +
+      "The app's background sync is also requesting it every minute, so once\n" +
+      "your filter allows it, groups will start filling in on their own — you\n" +
+      "can close this window.");
+  }
+
+  document.getElementById("go").addEventListener("click", fire);
+  fire();
+</script>

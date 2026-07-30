@@ -188,11 +188,11 @@
     border-right: 1px solid var(--rule);
   }
   .side-head {
-    padding: 1rem .95rem .8rem;
+    padding: .7rem .8rem .6rem;
     border-bottom: 1px solid var(--rule);
     animation: rise .5s cubic-bezier(.22, .8, .24, 1) both;
   }
-  .brand { display: flex; align-items: center; gap: .5rem; margin-bottom: .9rem; }
+  .brand { display: flex; align-items: center; gap: .5rem; margin-bottom: .6rem; }
   .mark {
     width: 26px; height: 26px; flex: none;
     border-radius: 1px; background: var(--accent);
@@ -261,9 +261,12 @@
   /* Section head: label, hairline rule to the margin, count. A running head. */
   .list-label {
     font-size: .6rem; color: var(--fg-soft);
-    padding: 1.1rem .95rem .5rem;
+    padding: .7rem .8rem .35rem;
     display: flex; align-items: center; gap: .55rem;
   }
+  /* The first section head sits right under the search field; it does not need
+     the full running-head lead the later ones get. */
+  .list > .list-label:first-child { padding-top: .5rem; }
   .list-label::after {
     content: ""; order: 1; flex: 1; height: 1px; background: var(--rule);
   }
@@ -274,11 +277,12 @@
 
   .row {
     display: flex; gap: .65rem; align-items: flex-start; width: 100%;
-    padding: .6rem .95rem; border-radius: 0;
+    padding: .5rem .8rem; border-radius: 0;
     border: 0; border-top: 1px solid transparent;
     background: none; color: inherit; font: inherit; text-align: left;
     cursor: pointer; position: relative;
   }
+  .conv + .conv .row { border-top: 1px solid var(--rule); }
   .row + .row { border-top-color: var(--rule); }
   .row:hover { background: var(--surface); }
   .row.active { background: var(--surface); }
@@ -325,10 +329,11 @@
     color: #fff; letter-spacing: .06em; text-transform: uppercase;
   }
   .avatar.sm { width: 26px; height: 26px; font-size: .58rem; }
+  .avatar.hd { width: 34px; height: 34px; font-size: .72rem; }
   .avatar.square { border-radius: 1px; }
 
   .side-foot {
-    border-top: 1px solid var(--rule); padding: .7rem .95rem;
+    border-top: 1px solid var(--rule); padding: .55rem .8rem;
     font-size: .58rem; color: var(--fg-soft);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     animation: rise .5s cubic-bezier(.22, .8, .24, 1) .14s both;
@@ -350,15 +355,32 @@
   .thread { display: none; flex-direction: column; flex: 1; min-height: 0; }
   .thread.show { display: flex; }
 
-  /* Running head. A double rule, the way a periodical sets one. */
+  /* Running head. A double rule, the way a periodical sets one. Kept tight —
+     this is a chat engine, so the head is a slim band, not a masthead. */
   .thread-head {
-    padding: .85rem 1.55rem .9rem; border-bottom: 3px double var(--rule);
-    background: var(--surface); flex: none;
+    padding: .5rem 1.1rem .52rem; border-bottom: 3px double var(--rule);
+    background: var(--surface); flex: none; position: relative;
   }
   .thread-head-inner {
-    display: flex; align-items: center; gap: .75rem;
+    display: flex; align-items: center; gap: .55rem;
     max-width: var(--measure); width: 100%; margin: 0 auto;
   }
+
+  /* The conversation identity is a control: its avatar and name open the
+     settings panel, so it reads as a button — quiet until hovered. */
+  .head-id {
+    display: flex; align-items: center; gap: .6rem; min-width: 0; flex: 1;
+    border: 0; background: none; color: inherit; text-align: left;
+    padding: .2rem .35rem .2rem .2rem; margin: 0; border-radius: 2px; cursor: pointer;
+  }
+  .head-id:hover { background: var(--raised); }
+  .head-id:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .head-av { flex: none; }
+  .head-caret {
+    flex: none; width: 13px; height: 13px; color: var(--fg-soft);
+    opacity: 0; transition: opacity .12s;
+  }
+  .head-id:hover .head-caret, .head-id:focus-visible .head-caret { opacity: 1; }
   .back {
     display: none; flex: none; width: 28px; height: 28px; padding: 0;
     align-items: center; justify-content: center;
@@ -368,12 +390,14 @@
   .back:hover { color: var(--fg); background: var(--raised); }
   .back svg { width: 14px; height: 14px; }
   .thread-title {
-    font-family: var(--font-display); font-size: 1.22rem; font-weight: 600;
+    display: block;
+    font-family: var(--font-display); font-size: 1.18rem; font-weight: 600;
     letter-spacing: .002em; line-height: 1.2; margin: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .thread-sub {
-    font-size: .58rem; color: var(--fg-soft); margin-top: .3rem;
+    display: block;
+    font-size: .58rem; color: var(--fg-soft); margin-top: .2rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .thread-sub.typing {
@@ -381,7 +405,7 @@
     font-size: .76rem; font-style: italic; color: var(--accent);
   }
   .thread-headtext { min-width: 0; flex: 1; }
-  .head-actions { display: flex; gap: .3rem; flex: none; }
+  .head-actions { display: flex; gap: .25rem; flex: none; }
   .hbtn {
     width: 28px; height: 28px; padding: 0; border-radius: 1px;
     border: 1px solid var(--rule); background: none; color: var(--fg-soft);
@@ -410,9 +434,9 @@
      exactly the same left edge as the running head and the composer. */
   .scroller {
     flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; position: relative;
-    padding: 0 1.55rem;
+    padding: 0 1.1rem;
   }
-  .messages { max-width: var(--measure); margin: 0 auto; padding: .6rem 0 1.6rem; }
+  .messages { max-width: var(--measure); margin: 0 auto; padding: .35rem 0 1rem; }
   .chunk { min-height: 1px; }
 
   .top-state { display: grid; place-items: center; padding: 1.1rem 0 .2rem; min-height: 1rem; }
@@ -429,7 +453,7 @@
 
   /* Section break between days. Rules to the margins, date set small and
      tracked in the middle — a dateline, not a chip. */
-  .day { display: flex; align-items: center; gap: .95rem; margin: 2.1rem 0 1.1rem; }
+  .day { display: flex; align-items: center; gap: .95rem; margin: 1.35rem 0 .8rem; }
   .day::before, .day::after { content: ""; height: 1px; background: var(--rule); flex: 1; }
   .day span { font-size: .58rem; color: var(--fg-soft); letter-spacing: .16em; }
 
@@ -449,7 +473,7 @@
 
   .msg {
     display: flex; gap: .7rem; align-items: flex-start; position: relative;
-    margin-top: 1rem; padding: .05rem .5rem;
+    margin-top: .6rem; padding: .05rem .5rem;
   }
   .msg.cont { margin-top: 0; padding-top: .2rem; padding-bottom: .2rem; }
   .msg .gutter { width: 26px; flex: none; }
@@ -652,7 +676,7 @@
 
   .composer {
     flex: none; border-top: 1px solid var(--rule);
-    padding: .7rem 1.55rem .8rem; background: var(--surface);
+    padding: .55rem 1.1rem .62rem; background: var(--surface);
   }
   .composer-inner { max-width: var(--measure); margin: 0 auto; }
 
@@ -901,8 +925,261 @@
     .spinner { animation: none; border-top-color: var(--rule); }
     .msg.flash { animation: none; }
     .side-head, .list, .side-foot, .empty-inner > * { animation: none; }
+    .head-caret { transition: none; }
     * { scroll-behavior: auto !important; }
   }
+
+  /* ---------- conversation row: pin / mute / overflow ----------
+     The row stays a single button; its per-conversation controls are siblings
+     laid over it, so nothing interactive is ever nested inside a button. The
+     overflow appears on hover and takes the place the timestamp vacates. */
+  .conv { position: relative; }
+
+  .row-flag {
+    flex: none; display: inline-flex; align-self: center;
+    color: var(--fg-soft); margin-left: .1rem;
+  }
+  .row-flag svg { width: 12px; height: 12px; display: block; }
+  .row-flag.pin { color: var(--accent); }
+  .row.muted .row-name { color: var(--fg-soft); }
+  .row.muted.unread .row-name { color: var(--fg-soft); }
+
+  .row-cog {
+    position: absolute; top: .5rem; right: .55rem; z-index: 2;
+    width: 24px; height: 24px; padding: 0; display: none;
+    align-items: center; justify-content: center;
+    border: 1px solid var(--rule); border-radius: 1px;
+    background: var(--surface); color: var(--fg-soft); cursor: pointer;
+  }
+  .row-cog svg { width: 13px; height: 13px; }
+  .row-cog:hover { color: var(--accent); border-color: var(--fg-soft); }
+  .conv:hover .row-cog, .row-cog:focus-visible { display: flex; }
+  .conv:hover .row-time, .conv:hover .unread-dot { visibility: hidden; }
+
+  /* Two-step confirm, rendered inside the shared menu popover. */
+  .confirm { padding: .7rem .8rem; min-width: 12rem; max-width: 16rem; }
+  .confirm-msg { font-size: .82rem; line-height: 1.45; color: var(--fg); margin-bottom: .6rem; }
+  .confirm-row { display: flex; gap: .4rem; justify-content: flex-end; }
+  .confirm-btn {
+    cursor: pointer; padding: .3rem .7rem; border-radius: 1px;
+    font-family: var(--font-label); font-size: .6rem; letter-spacing: .1em; text-transform: uppercase;
+    border: 1px solid var(--rule); background: var(--surface); color: var(--fg);
+  }
+  .confirm-btn:hover { border-color: var(--fg-soft); }
+  .confirm-btn.danger { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+  .confirm-btn.danger:hover { background: var(--fg); border-color: var(--fg); }
+
+  /* ---------- in-conversation find ----------
+     A second band under the running head, and a dropdown of matches scoped to
+     the open thread. Keyword only; it reuses the archive search command with a
+     conversation id. */
+  .findbar {
+    display: none; align-items: center; gap: .5rem; flex: none;
+    max-width: var(--measure); width: 100%; margin: .5rem auto 0;
+    padding: 0; position: relative;
+  }
+  .findbar.show { display: flex; }
+  .findbar > svg {
+    position: absolute; left: .55rem; top: 50%; transform: translateY(-50%);
+    width: 13px; height: 13px; color: var(--fg-soft); pointer-events: none;
+  }
+  .findbar input[type="search"] {
+    flex: 1; min-width: 0; font-family: var(--font-ui); font-size: .87rem;
+    padding: .4rem .6rem .4rem 1.85rem;
+  }
+  .find-count {
+    flex: none; font-family: var(--font-label); font-size: .58rem;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--fg-soft);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .find-nav {
+    flex: none; width: 26px; height: 26px; padding: 0; border-radius: 1px;
+    border: 1px solid var(--rule); background: none; color: var(--fg-soft);
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .find-nav:hover:not(:disabled) { color: var(--fg); background: var(--raised); }
+  .find-nav:disabled { opacity: .4; cursor: default; }
+  .find-nav svg { width: 13px; height: 13px; }
+
+  .findresults {
+    position: absolute; z-index: 30; display: none;
+    left: 50%; transform: translateX(-50%); top: 100%;
+    width: min(var(--measure), calc(100% - 2.2rem)); max-height: 46vh; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--rule);
+    border-top: 0; box-shadow: var(--pop);
+  }
+  .findresults.show { display: block; }
+  .find-result {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    border: 0; border-top: 1px solid var(--rule); background: none; color: inherit;
+    padding: .5rem .8rem;
+  }
+  .find-result:first-child { border-top: 0; }
+  .find-result:hover, .find-result.sel { background: var(--raised); }
+  .find-result .fr-top {
+    display: flex; align-items: baseline; gap: .5rem;
+    font-family: var(--font-label); letter-spacing: .1em; text-transform: uppercase;
+    font-size: .56rem; color: var(--fg-soft);
+  }
+  .find-result .fr-who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .find-result .fr-when { flex: none; font-variant-numeric: tabular-nums; }
+  .find-result .fr-text {
+    font-size: .82rem; color: var(--fg); margin-top: .22rem; line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .find-empty { padding: .7rem .8rem; color: var(--fg-soft); font-size: .8rem; }
+
+  /* ---------- date jump popover ---------- */
+  .datepop { padding: .6rem; min-width: 13rem; }
+  .datepop .dp-label {
+    font-family: var(--font-label); font-size: .56rem; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--fg-soft); margin-bottom: .4rem;
+  }
+  .datepop input[type="date"] {
+    width: 100%; font: inherit; font-family: var(--font-ui); font-size: .85rem;
+    padding: .4rem .5rem; border-radius: 1px; border: 1px solid var(--rule);
+    background: var(--surface); color: var(--fg);
+    -webkit-user-select: text; user-select: text;
+    color-scheme: light dark;
+  }
+  .datepop input[type="date"]:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+  .datepop .dp-go {
+    margin-top: .5rem; width: 100%; padding: .4rem .5rem; cursor: pointer;
+    font-family: var(--font-label); font-size: .6rem; letter-spacing: .1em;
+    text-transform: uppercase;
+    border: 1px solid var(--accent); border-radius: 1px;
+    background: var(--accent); color: var(--bg);
+  }
+  .datepop .dp-go:hover { background: var(--fg); border-color: var(--fg); }
+
+  /* ---------- conversation settings sheet ----------
+     A centered panel, not a page: the group's people and the actions that act
+     on the whole conversation. Rules and layered paper, same as everything. */
+  .sheet {
+    position: fixed; z-index: 41; display: none;
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(30rem, calc(100vw - 2rem)); max-height: min(80vh, 44rem);
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 2px;
+    box-shadow: var(--pop); flex-direction: column; overflow: hidden;
+  }
+  .sheet.show { display: flex; }
+  .sheet-head {
+    display: flex; align-items: center; gap: .7rem; flex: none;
+    padding: 1rem 1.1rem .9rem; border-bottom: 3px double var(--rule);
+  }
+  .sheet-headtext { min-width: 0; flex: 1; }
+  .sheet-title {
+    font-family: var(--font-display); font-size: 1.16rem; font-weight: 600;
+    line-height: 1.2; margin: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sheet-sub {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft); margin-top: .3rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .sheet-x {
+    flex: none; width: 28px; height: 28px; padding: 0; border-radius: 1px;
+    border: 1px solid var(--rule); background: none; color: var(--fg-soft);
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .sheet-x:hover { color: var(--fg); background: var(--raised); }
+  .sheet-x svg { width: 14px; height: 14px; }
+
+  .sheet-body { overflow-y: auto; min-height: 0; }
+
+  .sheet-actions {
+    display: flex; flex-wrap: wrap; gap: .4rem; padding: .8rem 1.1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .sheet-act {
+    display: inline-flex; align-items: center; gap: .45rem; cursor: pointer;
+    padding: .4rem .65rem; border-radius: 1px;
+    border: 1px solid var(--rule); background: none; color: var(--fg);
+    font-family: var(--font-label); font-size: .62rem; letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .sheet-act svg { width: 13px; height: 13px; color: var(--fg-soft); }
+  .sheet-act:hover { background: var(--raised); border-color: var(--fg-soft); }
+  .sheet-act.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .sheet-act.on svg { color: var(--accent); }
+  .sheet-act.danger { color: var(--accent); }
+  .sheet-act.danger svg { color: var(--accent); }
+  .sheet-act.danger:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+  .sheet-confirm {
+    display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
+    padding: .7rem 1.1rem; border-bottom: 1px solid var(--rule);
+    background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent);
+    font-size: .82rem; color: var(--fg);
+  }
+  .sheet-confirm .grow { flex: 1; min-width: 8rem; }
+  .sheet-confirm button {
+    flex: none; cursor: pointer; padding: .3rem .7rem; border-radius: 1px;
+    font-family: var(--font-label); font-size: .6rem; letter-spacing: .1em;
+    text-transform: uppercase; border: 1px solid var(--rule); background: var(--surface); color: var(--fg);
+  }
+  .sheet-confirm button.go { border-color: var(--accent); background: var(--accent); color: var(--bg); }
+  .sheet-confirm button:hover { border-color: var(--fg-soft); }
+  .sheet-confirm button.go:hover { background: var(--fg); border-color: var(--fg); }
+
+  .sheet-sec {
+    display: flex; align-items: center; gap: .55rem;
+    padding: .9rem 1.1rem .4rem;
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft);
+  }
+  .sheet-sec::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+  .sheet-sec .cnt { flex: none; color: var(--accent); letter-spacing: .09em; }
+
+  .member-filter { padding: 0 1.1rem .4rem; }
+  .member-filter input {
+    width: 100%; font: inherit; font-family: var(--font-ui); font-size: .84rem;
+    padding: .38rem .55rem; border-radius: 1px; border: 1px solid var(--rule);
+    background: var(--surface); color: var(--fg);
+    -webkit-user-select: text; user-select: text;
+  }
+  .member-filter input:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+
+  .members { padding: 0 0 .5rem; }
+  .member {
+    display: flex; align-items: center; gap: .6rem; position: relative;
+    padding: .42rem 1.1rem;
+  }
+  .member + .member { border-top: 1px solid var(--rule); }
+  .member-text { min-width: 0; flex: 1; }
+  .member-name {
+    font-family: var(--font-display); font-size: .9rem; font-weight: 600; line-height: 1.2;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .member-sub {
+    font-size: .74rem; color: var(--fg-soft); line-height: 1.35;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .member-role {
+    flex: none; font-family: var(--font-label); font-size: .52rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft);
+    border: 1px solid var(--rule); border-radius: 1px; padding: .05rem .3rem;
+  }
+  .member-role.owner { color: var(--accent); border-color: var(--accent); }
+  .member-block {
+    flex: none; width: 24px; height: 24px; padding: 0; display: none;
+    align-items: center; justify-content: center; cursor: pointer;
+    border: 1px solid var(--rule); border-radius: 1px; background: none; color: var(--fg-soft);
+  }
+  .member-block svg { width: 13px; height: 13px; }
+  .member:hover .member-block, .member-block:focus-visible { display: flex; }
+  .member-block:hover { color: var(--accent); border-color: var(--accent); }
+  .member-block.on { display: flex; color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+  .sheet-note {
+    padding: .8rem 1.1rem; color: var(--fg-soft); font-size: .82rem; line-height: 1.55;
+  }
+  .sheet-note .spinner { margin: .2rem auto; }
 </style>
 
 <!--
@@ -925,6 +1202,14 @@
   <svg id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/></svg>
   <svg id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zm0 0v5h5"/></svg>
   <svg id="i-broken" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6"/></svg>
+  <svg id="i-cog" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M4.2 4.2l1.9 1.9M17.9 17.9l1.9 1.9M2.5 12h2.6M18.9 12h2.6M4.2 19.8l1.9-1.9M17.9 6.1l1.9-1.9"/></svg>
+  <svg id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 4.5 2 5.5 2 5.5H4S6 13.5 6 9z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
+  <svg id="i-bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.3 4.8A6 6 0 0 1 18 9c0 4.5 2 5.5 2 5.5h-9"/><path d="M6.2 6.2A6 6 0 0 0 6 9c0 4.5-2 5.5-2 5.5h9"/><path d="M10 19a2 2 0 0 0 4 0"/><path d="M3 3l18 18"/></svg>
+  <svg id="i-leave" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3"/><path d="m15 16 5-4-5-4"/><path d="M20 12H9"/></svg>
+  <svg id="i-block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg>
+  <svg id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>
+  <svg id="i-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+  <svg id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
 </div>
 
 <div class="app" id="app">
@@ -965,14 +1250,36 @@
              transcript and the composer, so the page has one left margin. -->
         <div class="thread-head-inner">
           <button class="back" id="back" type="button" aria-label="Back to conversations"></button>
-          <div class="thread-headtext">
-            <h1 class="thread-title" id="tTitle"></h1>
-            <div class="thread-sub" id="tSub"></div>
-          </div>
+          <!-- The identity is a control: its avatar and name open the settings
+               panel for this conversation. -->
+          <button class="head-id" id="headId" type="button"
+                  aria-haspopup="dialog" aria-label="Conversation settings">
+            <span class="head-av" id="tAvatar" aria-hidden="true"></span>
+            <span class="thread-headtext">
+              <span class="thread-title" id="tTitle"></span>
+              <span class="thread-sub" id="tSub"></span>
+            </span>
+            <svg class="head-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
           <div class="head-actions">
+            <button class="hbtn" id="toFind" type="button" title="Search this conversation" aria-label="Search within this conversation"></button>
+            <button class="hbtn" id="toDate" type="button" title="Jump to a date" aria-label="Jump to a date"></button>
             <button class="hbtn" id="toLatest" type="button" title="Jump to latest" aria-label="Jump to the newest message"></button>
+            <button class="hbtn" id="toSettings" type="button" title="Conversation settings" aria-label="Conversation settings"></button>
           </div>
         </div>
+        <!-- In-conversation keyword search: a slim band under the head, with a
+             dropdown of matches scoped to this thread. -->
+        <div class="findbar" id="findbar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+          <input type="search" id="findq" placeholder="Search in this conversation"
+                 aria-label="Search within this conversation" autocomplete="off" spellcheck="false" />
+          <span class="find-count" id="findCount"></span>
+          <button class="find-nav" id="findPrev" type="button" title="Previous match" aria-label="Previous match"></button>
+          <button class="find-nav" id="findNext" type="button" title="Next match" aria-label="Next match"></button>
+          <button class="find-nav" id="findClose" type="button" title="Close search" aria-label="Close conversation search"></button>
+        </div>
+        <div class="findresults" id="findResults" role="listbox" aria-label="Matches in this conversation"></div>
       </header>
 
       <div class="banner" id="banner">
@@ -1022,6 +1329,8 @@
 <div class="scrim" id="scrim"></div>
 <div class="pop pop-emoji" id="emojiPop" role="menu" aria-label="React with"></div>
 <div class="pop menu" id="menuPop" role="menu" aria-label="Message actions"></div>
+<div class="pop datepop" id="datePop" role="dialog" aria-label="Jump to a date"></div>
+<div class="sheet" id="convSheet" role="dialog" aria-modal="true" aria-label="Conversation settings"></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -1616,6 +1925,62 @@
     return (c && c.name) || (c && c.kind === "dm" ? "Direct message" : "Untitled group");
   }
 
+  /* --------- pin / mute / block state ---------
+     `pin_rank` is a small real number, so it is fine to treat numerically;
+     `muted` is a bool. Neither is an id. The group member list and the local
+     block set are on-demand caches, never persisted. */
+
+  var groupDetailCache = Object.create(null); // cid -> group object incl. members
+  var blockedUsers = Object.create(null);     // user id string -> true (optimistic)
+
+  function pinRankOf(c) {
+    var r = fld(c, "pin_rank", "pinRank");
+    if (r == null) return null;
+    var n = Number(r);
+    return isFinite(n) ? n : null;
+  }
+  function isPinned(c) { return pinRankOf(c) != null; }
+  function isMuted(c) { return !!(c && (c.muted === true || c.muted === 1 || fld(c, "muted") === true)); }
+
+  // Pinned conversations, ordered by ascending pin_rank. The list arrives from
+  // the archive already pinned-first, but sorting here keeps reorder correct
+  // regardless of the incoming order.
+  function pinnedSorted() {
+    return state.convos.filter(isPinned).sort(function (a, b) {
+      var ra = pinRankOf(a), rb = pinRankOf(b);
+      if (ra !== rb) return ra < rb ? -1 : 1;
+      return 0;
+    });
+  }
+
+  // The other participant of a DM. Ids stay strings the whole way. Prefers an
+  // explicit field, then the "+"-joined key with our own id removed, then the
+  // id itself (this app keys a DM by the other user's id).
+  function dmOtherUserId(c) {
+    if (!c) return null;
+    var o = fld(c, "other_user_id", "otherUserId");
+    if (o != null) return String(o);
+    if (c.other_user && c.other_user.id != null) return String(c.other_user.id);
+    var id = String(c.id == null ? "" : c.id);
+    if (id.indexOf("+") >= 0) {
+      var parts = id.split("+").map(function (s) { return s.trim(); }).filter(Boolean);
+      if (state.selfId) {
+        for (var i = 0; i < parts.length; i++) if (parts[i] !== state.selfId) return parts[i];
+      }
+      return parts[0] || null;
+    }
+    return id || null;
+  }
+
+  function isBlocked(uid) { return uid != null && !!blockedUsers[String(uid)]; }
+
+  function shortName(name) {
+    var s = String(name == null ? "" : name).trim();
+    if (!s) return "user";
+    var first = s.split(/\s+/)[0];
+    return first.length > 18 ? first.slice(0, 18) + "…" : first;
+  }
+
   function renderConversations() {
     listEl.textContent = "";
     if (!state.convos.length) {
@@ -1623,23 +1988,47 @@
         "No conversations have been archived yet. The first sync is still running."));
       return;
     }
+    // Pinned first, in the user's pin order; the rest keep the recency order the
+    // archive already delivers. Two sections, so reorder has somewhere to move.
+    var pinned = pinnedSorted();
+    var rest = state.convos.filter(function (c) { return !isPinned(c); });
     var unread = state.convos.filter(isUnread).length;
-    var label = el("div", "list-label", "Conversations");
+
+    if (pinned.length) {
+      var plabel = el("div", "list-label", "Pinned");
+      plabel.appendChild(el("span", "sub", String(pinned.length)));
+      listEl.appendChild(plabel);
+      var pfrag = document.createDocumentFragment();
+      pinned.forEach(function (c) { pfrag.appendChild(convoRow(c)); });
+      listEl.appendChild(pfrag);
+    }
+
+    var label = el("div", "list-label", pinned.length ? "All conversations" : "Conversations");
     if (unread) label.appendChild(el("span", "sub", unread + " unread"));
     listEl.appendChild(label);
     var frag = document.createDocumentFragment();
-    state.convos.forEach(function (c) { frag.appendChild(convoRow(c)); });
+    rest.forEach(function (c) { frag.appendChild(convoRow(c)); });
     listEl.appendChild(frag);
   }
 
+  // The row stays a single button, wrapped in a `.conv` that also owns the
+  // overflow control — a sibling laid over the row, never a button nested in a
+  // button. `data-cid` is on the wrapper (what the list operations target) and
+  // on the row (what the active/unread repaints target).
   function convoRow(c) {
     var name = convoTitle(c);
     var un = unreadInfo(c);
+    var pinned = isPinned(c), muted = isMuted(c);
+
+    var wrap = el("div", "conv" + (pinned ? " pinned" : ""));
+    wrap.dataset.cid = c.id;
+
     var row = el("button", "row");
     row.type = "button";
     row.setAttribute("role", "listitem");
     if (state.active === c.id) row.classList.add("active");
     if (un.unread) row.classList.add("unread");
+    if (muted) row.classList.add("muted");
     row.dataset.cid = c.id;
 
     row.appendChild(makeAvatar(name, fld(c, "image_url", "imageUrl"), c.id, c.kind === "group" ? "square" : null));
@@ -1647,6 +2036,16 @@
     var body = el("div", "row-body");
     var top = el("div", "row-top");
     top.appendChild(el("div", "row-name", name));
+    if (pinned) {
+      var pf = withIcon(el("span", "row-flag pin"), "pin");
+      pf.setAttribute("aria-label", "Pinned");
+      top.appendChild(pf);
+    }
+    if (muted) {
+      var mf = withIcon(el("span", "row-flag mute"), "bell-off");
+      mf.setAttribute("aria-label", "Muted");
+      top.appendChild(mf);
+    }
     top.appendChild(el("div", "row-time", relTime(convoStamp(c))));
     if (un.unread) {
       // A number when the server knows one, otherwise a plain accent mark. The
@@ -1664,9 +2063,16 @@
     var prev = fld(c, "last_message_text", "lastMessageText");
     body.appendChild(el("div", "row-prev", prev ? String(prev).replace(/\s+/g, " ") : "No messages yet"));
     row.appendChild(body);
-
     row.addEventListener("click", function () { openConversation(c.id); });
-    return row;
+    wrap.appendChild(row);
+
+    var cog = btn("row-cog", "Options for " + name, function (e) {
+      e.stopPropagation();
+      openConvMenu(e.currentTarget, c);
+    });
+    cog.appendChild(icon("cog"));
+    wrap.appendChild(cog);
+    return wrap;
   }
 
   // Moves one conversation to the top and repaints only the rows that changed,
@@ -1679,12 +2085,23 @@
     var i = state.convos.indexOf(c);
     if (i > 0) { state.convos.splice(i, 1); state.convos.unshift(c); }
     if (searchActive()) return;
-    var existing = listEl.querySelector('.row[data-cid="' + cssEscape(cid) + '"]');
+
+    var existing = listEl.querySelector('.conv[data-cid="' + cssEscape(cid) + '"]');
     var fresh = convoRow(c);
-    if (existing && i === 0) { existing.replaceWith(fresh); return; }
+
+    // A pinned row keeps its user-chosen slot; new activity only refreshes its
+    // content (preview text, timestamp, unread mark), never its position.
+    if (isPinned(c)) {
+      if (existing) existing.replaceWith(fresh);
+      else renderConversations();
+      return;
+    }
+    // An unpinned row rises to the top of the unpinned section — which sits
+    // directly under its section label, after any pinned rows.
     if (existing) existing.remove();
-    var first = listEl.querySelector(".row");
-    if (first) listEl.insertBefore(fresh, first); else listEl.appendChild(fresh);
+    var firstUnpinned = listEl.querySelector('.conv:not(.pinned)');
+    if (firstUnpinned) listEl.insertBefore(fresh, firstUnpinned);
+    else renderConversations();
   }
 
   function cssEscape(v) {
@@ -2897,6 +3314,14 @@
     showBanner(null);
 
     $("tTitle").textContent = convoTitle(c) || "Conversation";
+    // The conversation's own avatar next to its name — the group image or the
+    // DM avatar, and the same letter-plate the sidebar uses when there is none.
+    var av = $("tAvatar");
+    av.textContent = "";
+    av.appendChild(makeAvatar(convoTitle(c), c && fld(c, "image_url", "imageUrl"), cid,
+      "hd" + (kind === "group" ? " square" : "")));
+    $("headId").setAttribute("aria-label", "Settings for " + (convoTitle(c) || "this conversation"));
+    closeFind();
     updateSub();
     clearThreadDom();
     setTop("spinner");
@@ -3442,10 +3867,13 @@
   /* ============================= popovers =============================== */
 
   var scrim = $("scrim"), emojiPop = $("emojiPop"), menuPop = $("menuPop");
+  var datePop = $("datePop"), convSheet = $("convSheet");
 
   function closePops() {
     emojiPop.classList.remove("show");
     menuPop.classList.remove("show");
+    datePop.classList.remove("show");
+    convSheet.classList.remove("show");
     scrim.classList.remove("show");
   }
 
@@ -3644,6 +4072,572 @@
     searchSeq++;
     searchWrap.classList.remove("busy");
     renderConversations();
+  }
+
+  /* ===================== per-conversation actions =======================
+     Pin / reorder pins / mute / leave / block. Each write applies optimistically
+     for a responsive toggle, then confirms over IPC; on a filtered network the
+     command rejects with a string and the change is reverted and surfaced. A
+     write that silently did nothing is the outcome this app most wants to avoid. */
+
+  function setBlocked(uid, v) {
+    if (uid == null) return;
+    if (v) blockedUsers[String(uid)] = true; else delete blockedUsers[String(uid)];
+  }
+
+  // Re-paints wherever the changed conversation is shown: the sidebar sections,
+  // and the settings sheet if it is open on this conversation.
+  function afterConvChange(c) {
+    if (!searchActive()) renderConversations();
+    if (convSheet.classList.contains("show") && sheetCid != null &&
+        (c == null || String(c.id) === String(sheetCid))) renderSheet();
+  }
+
+  function commitConv(apply, revert, cmd, args, okMsg) {
+    apply();
+    write(cmd, args).then(function () {
+      if (okMsg) toast(okMsg);
+    }, function (e) {
+      revert();
+      toast((e && e.message) ? e.message : "That didn't work — check your connection.", true);
+    });
+  }
+
+  function togglePin(c) {
+    var was = pinRankOf(c);
+    if (was != null) {
+      commitConv(
+        function () { c.pin_rank = null; afterConvChange(c); },
+        function () { c.pin_rank = was; afterConvChange(c); },
+        "client_set_pin", { conversationId: String(c.id), rank: null }, "Unpinned");
+    } else {
+      var rank = pinnedSorted().length; // append at the end of the pin order
+      commitConv(
+        function () { c.pin_rank = rank; afterConvChange(c); },
+        function () { c.pin_rank = null; afterConvChange(c); },
+        "client_set_pin", { conversationId: String(c.id), rank: rank }, "Pinned");
+    }
+  }
+
+  function toggleMute(c) {
+    var was = isMuted(c);
+    commitConv(
+      function () { c.muted = !was; afterConvChange(c); },
+      function () { c.muted = was; afterConvChange(c); },
+      "client_set_mute", { conversationId: String(c.id), muted: !was },
+      was ? "Unmuted" : "Muted");
+  }
+
+  // Moves a pinned conversation one slot within the pin order and persists the
+  // whole order, so ranks stay 0..n-1 with no gaps or collisions.
+  function movePin(c, dir) {
+    var pins = pinnedSorted();
+    var i = pins.findIndex(function (p) { return String(p.id) === String(c.id); });
+    var j = i + dir;
+    if (i < 0 || j < 0 || j >= pins.length) return;
+    var reordered = pins.slice();
+    var tmp = reordered[i]; reordered[i] = reordered[j]; reordered[j] = tmp;
+    var prev = pins.map(function (p) { return { c: p, rank: pinRankOf(p) }; });
+    commitConv(
+      function () { reordered.forEach(function (p, k) { p.pin_rank = k; }); afterConvChange(null); },
+      function () { prev.forEach(function (o) { o.c.pin_rank = o.rank; }); afterConvChange(null); },
+      "client_reorder_pins", { orderedIds: reordered.map(function (p) { return String(p.id); }) });
+  }
+
+  function leaveGroup(c) {
+    write("client_leave_group", { groupId: String(c.id) }).then(function () {
+      removeConversation(c.id);
+      toast("Left the group");
+    }, function (e) {
+      toast((e && e.message) ? e.message : "Couldn't leave the group.", true);
+    });
+  }
+
+  function removeConversation(cid) {
+    var c = state.byId[cid];
+    delete state.byId[cid];
+    var i = state.convos.indexOf(c);
+    if (i >= 0) state.convos.splice(i, 1);
+    if (String(state.active) === String(cid)) {
+      state.active = null;
+      threadEl.classList.remove("show");
+      emptyEl.classList.remove("hide");
+      app.classList.remove("thread-open");
+      closeFind();
+    }
+    if (convSheet.classList.contains("show") && String(sheetCid) === String(cid)) closePops();
+    if (!searchActive()) renderConversations();
+  }
+
+  function doBlock(c, blocked) {
+    var uid = dmOtherUserId(c);
+    if (uid == null) { toast("Couldn't tell who to block.", true); return; }
+    commitConv(
+      function () { setBlocked(uid, blocked); afterConvChange(c); },
+      function () { setBlocked(uid, !blocked); afterConvChange(c); },
+      "client_set_block", { userId: String(uid), blocked: !!blocked },
+      blocked ? "Blocked" : "Unblocked");
+  }
+
+  function blockMember(uid, name, blocked) {
+    if (uid == null) return;
+    commitConv(
+      function () { setBlocked(uid, blocked); if (sheetCid != null && convSheet.classList.contains("show")) renderSheet(); },
+      function () { setBlocked(uid, !blocked); if (sheetCid != null && convSheet.classList.contains("show")) renderSheet(); },
+      "client_set_block", { userId: String(uid), blocked: !!blocked },
+      blocked ? ("Blocked " + shortName(name)) : ("Unblocked " + shortName(name)));
+  }
+
+  /* ---------- the sidebar row overflow menu ---------- */
+
+  function openConvMenu(anchor, c) {
+    var pinned = isPinned(c), muted = isMuted(c);
+    menuPop.textContent = "";
+
+    menuPop.appendChild(menuItem(pinned ? "Unpin" : "Pin to top", "pin", function () { togglePin(c); }));
+    if (pinned) {
+      var pins = pinnedSorted();
+      var idx = pins.findIndex(function (p) { return String(p.id) === String(c.id); });
+      if (idx > 0) menuPop.appendChild(menuItem("Move up", "up", function () { movePin(c, -1); }));
+      if (idx >= 0 && idx < pins.length - 1) menuPop.appendChild(menuItem("Move down", "caret", function () { movePin(c, 1); }));
+    }
+    menuPop.appendChild(menuItem(muted ? "Unmute" : "Mute", muted ? "bell" : "bell-off", function () { toggleMute(c); }));
+    menuPop.appendChild(menuItem("Settings…", "cog", function () { openConvSettings(String(c.id)); }));
+
+    menuPop.appendChild(document.createElement("hr"));
+    if (c.kind === "group") {
+      menuPop.appendChild(menuItem("Leave group", "leave", function () { confirmLeave(anchor, c); }, true));
+    } else {
+      var uid = dmOtherUserId(c);
+      var blocked = isBlocked(uid);
+      menuPop.appendChild(menuItem((blocked ? "Unblock " : "Block ") + shortName(convoTitle(c)), "block",
+        function () { if (blocked) doBlock(c, false); else confirmBlock(anchor, c); }, true));
+    }
+    placePop(menuPop, anchor);
+  }
+
+  function confirmPop(anchor, message, actionLabel, fn) {
+    menuPop.textContent = "";
+    var box = el("div", "confirm");
+    box.appendChild(el("div", "confirm-msg", message));
+    var row = el("div", "confirm-row");
+    var cancel = el("button", "confirm-btn", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", closePops);
+    var ok = el("button", "confirm-btn danger", actionLabel);
+    ok.type = "button";
+    ok.addEventListener("click", function () { closePops(); fn(); });
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    menuPop.appendChild(box);
+    placePop(menuPop, anchor);
+  }
+
+  function confirmLeave(anchor, c) {
+    confirmPop(anchor, "Leave “" + convoTitle(c) + "”? You'll stop receiving its messages.",
+      "Leave", function () { leaveGroup(c); });
+  }
+  function confirmBlock(anchor, c) {
+    confirmPop(anchor, "Block " + convoTitle(c) + "? They won't be able to message you.",
+      "Block", function () { doBlock(c, true); });
+  }
+
+  /* ================= conversation settings sheet ========================
+     Clicking the header identity (avatar or name) or the gear opens this. For a
+     group it shows the whole roster from `client_group_detail` plus the actions;
+     for a DM it is a lighter panel — the other person, mute and block. */
+
+  var sheetCid = null, sheetFilter = "", sheetConfirmMode = null;
+  var MEMBER_CAP = 300;
+
+  function openConvSettings(cid) {
+    var c = state.byId[cid];
+    if (!c) return;
+    closePops();
+    sheetCid = String(cid);
+    sheetFilter = "";
+    sheetConfirmMode = null;
+    renderSheet();
+    convSheet.classList.add("show");
+    scrim.classList.add("show");
+    if (c.kind === "group" && !groupDetailCache[sheetCid]) loadGroupDetail(sheetCid);
+  }
+
+  function loadGroupDetail(cid) {
+    call("client_group_detail", { groupId: String(cid) }).then(function (g) {
+      // `call` swallows a failure to null; store a sentinel so the panel shows
+      // the graceful "directory blocked" note rather than a permanent spinner.
+      groupDetailCache[String(cid)] = g || { __failed: true };
+      if (sheetCid === String(cid) && convSheet.classList.contains("show")) renderSheet();
+    });
+  }
+
+  function sheetSubText(c) {
+    if (c.kind !== "group") return "Direct message";
+    var g = groupDetailCache[String(c.id)];
+    var n = null;
+    if (g && Array.isArray(g.members)) n = g.members.length;
+    else { var mc = fld(c, "members_count", "membersCount"); if (mc != null && Number(mc) > 0) n = Number(mc); }
+    return n != null ? ("Group · " + n.toLocaleString() + (n === 1 ? " member" : " members")) : "Group";
+  }
+
+  function sheetAct(label, iconName, on, danger, fn) {
+    var b = el("button", "sheet-act" + (on ? " on" : "") + (danger ? " danger" : ""));
+    b.type = "button";
+    b.appendChild(icon(iconName));
+    b.appendChild(el("span", null, label));
+    b.addEventListener("click", fn);
+    return b;
+  }
+
+  function renderSheet() {
+    if (sheetCid == null) return;
+    var c = state.byId[sheetCid];
+    if (!c) { closePops(); return; }
+    var isGroup = c.kind === "group";
+    convSheet.textContent = "";
+
+    var head = el("div", "sheet-head");
+    head.appendChild(makeAvatar(convoTitle(c), fld(c, "image_url", "imageUrl"), c.id,
+      "hd" + (isGroup ? " square" : "")));
+    var ht = el("div", "sheet-headtext");
+    ht.appendChild(el("div", "sheet-title", convoTitle(c)));
+    ht.appendChild(el("div", "sheet-sub", sheetSubText(c)));
+    head.appendChild(ht);
+    var x = btn("sheet-x", "Close", closePops);
+    x.appendChild(icon("x"));
+    head.appendChild(x);
+    convSheet.appendChild(head);
+
+    var body = el("div", "sheet-body");
+
+    var acts = el("div", "sheet-actions");
+    var pinned = isPinned(c), muted = isMuted(c);
+    acts.appendChild(sheetAct(pinned ? "Unpin" : "Pin", "pin", pinned, false, function () { togglePin(c); }));
+    acts.appendChild(sheetAct(muted ? "Unmute" : "Mute", muted ? "bell" : "bell-off", muted, false, function () { toggleMute(c); }));
+    if (pinned) {
+      var pins = pinnedSorted();
+      var idx = pins.findIndex(function (p) { return String(p.id) === String(c.id); });
+      if (idx > 0) acts.appendChild(sheetAct("Move up", "up", false, false, function () { movePin(c, -1); }));
+      if (idx >= 0 && idx < pins.length - 1) acts.appendChild(sheetAct("Move down", "caret", false, false, function () { movePin(c, 1); }));
+    }
+    if (isGroup) {
+      acts.appendChild(sheetAct("Leave group", "leave", false, true, function () { sheetConfirmMode = "leave"; renderSheet(); }));
+    } else {
+      var uid = dmOtherUserId(c);
+      var blocked = isBlocked(uid);
+      acts.appendChild(sheetAct(blocked ? "Unblock" : "Block", "block", blocked, true, function () {
+        if (blocked) doBlock(c, false); else { sheetConfirmMode = "block"; renderSheet(); }
+      }));
+    }
+    body.appendChild(acts);
+
+    if (sheetConfirmMode) body.appendChild(buildSheetConfirm(c));
+
+    if (isGroup) body.appendChild(buildMembers(c));
+    else body.appendChild(dmNote(c));
+
+    convSheet.appendChild(body);
+  }
+
+  function buildSheetConfirm(c) {
+    var band = el("div", "sheet-confirm");
+    band.appendChild(el("span", "grow",
+      sheetConfirmMode === "leave" ? ("Leave “" + convoTitle(c) + "”?") : ("Block " + convoTitle(c) + "?")));
+    var cancel = el("button", null, "Cancel"); cancel.type = "button";
+    cancel.addEventListener("click", function () { sheetConfirmMode = null; renderSheet(); });
+    var go = el("button", "go", sheetConfirmMode === "leave" ? "Leave" : "Block"); go.type = "button";
+    go.addEventListener("click", function () {
+      var mode = sheetConfirmMode; sheetConfirmMode = null;
+      if (mode === "leave") leaveGroup(c); else doBlock(c, true);
+      renderSheet();
+    });
+    band.appendChild(cancel); band.appendChild(go);
+    return band;
+  }
+
+  function dmNote(c) {
+    var uid = dmOtherUserId(c);
+    return el("div", "sheet-note", isBlocked(uid)
+      ? "You've blocked this person. Unblock to exchange messages again."
+      : "A direct conversation. Mute silences its notifications; Block stops their messages.");
+  }
+
+  function memberName(m) {
+    return String(fld(m, "nickname", "name") || "Member");
+  }
+
+  function topRole(m) {
+    var roles = fld(m, "roles");
+    if (!Array.isArray(roles)) return null;
+    var lower = roles.map(function (r) { return String(r).toLowerCase(); });
+    if (lower.indexOf("owner") >= 0) return "Owner";
+    if (lower.indexOf("admin") >= 0) return "Admin";
+    return null;
+  }
+
+  function memberRow(m, nm) {
+    var row = el("div", "member");
+    row.appendChild(makeAvatar(nm, fld(m, "image_url", "imageUrl", "avatar_url", "avatarUrl"),
+      fld(m, "user_id", "userId") || nm, "sm"));
+    var tx = el("div", "member-text");
+    tx.appendChild(el("div", "member-name", nm));
+    var realName = fld(m, "name"), nick = fld(m, "nickname");
+    if (nick && realName && String(nick) !== String(realName)) {
+      tx.appendChild(el("div", "member-sub", String(realName)));
+    }
+    row.appendChild(tx);
+
+    var role = topRole(m);
+    if (role) row.appendChild(el("span", "member-role" + (role === "Owner" ? " owner" : ""), role));
+
+    var uid = fld(m, "user_id", "userId");
+    if (uid != null && (!state.selfId || String(uid) !== state.selfId)) {
+      var blocked = isBlocked(uid);
+      var bb = btn("member-block" + (blocked ? " on" : ""),
+        (blocked ? "Unblock " : "Block ") + nm, function (e) {
+          e.stopPropagation();
+          blockMember(String(uid), nm, !blocked);
+        });
+      bb.appendChild(icon("block"));
+      row.appendChild(bb);
+    }
+    return row;
+  }
+
+  function fillMembers(list, members, needle) {
+    list.textContent = "";
+    var shown = 0, matched = 0;
+    for (var i = 0; i < members.length; i++) {
+      var m = members[i];
+      var nm = memberName(m);
+      if (needle && nm.toLowerCase().indexOf(needle) < 0) {
+        var real = fld(m, "name");
+        if (!(real && String(real).toLowerCase().indexOf(needle) >= 0)) continue;
+      }
+      matched++;
+      if (shown >= MEMBER_CAP) continue;
+      list.appendChild(memberRow(m, nm));
+      shown++;
+    }
+    if (!matched) {
+      list.appendChild(el("div", "sheet-note", needle ? "No members match that." : "No members to show."));
+    } else if (matched > shown) {
+      list.appendChild(el("div", "sheet-note",
+        "Showing " + shown.toLocaleString() + " of " + matched.toLocaleString() + " — narrow the filter to find someone."));
+    }
+  }
+
+  function refreshMembers(c) {
+    var list = $("membersList");
+    if (!list) return;
+    var g = groupDetailCache[String(c.id)];
+    var members = g && Array.isArray(g.members) ? g.members : [];
+    fillMembers(list, members, sheetFilter.trim().toLowerCase());
+  }
+
+  function buildMembers(c) {
+    var wrap = document.createDocumentFragment();
+    var g = groupDetailCache[String(c.id)];
+
+    if (!g) {
+      var note = el("div", "sheet-note");
+      var sp = el("div", "spinner");
+      sp.setAttribute("role", "status");
+      sp.setAttribute("aria-label", "Loading members");
+      note.appendChild(sp);
+      wrap.appendChild(note);
+      return wrap;
+    }
+    var members = Array.isArray(g.members) ? g.members : null;
+    if (!members) {
+      wrap.appendChild(el("div", "sheet-note",
+        "The member list couldn't be loaded — the group directory is currently blocked by a network filter. The conversation itself is fully readable and searchable."));
+      return wrap;
+    }
+
+    var sec = el("div", "sheet-sec", "Members");
+    sec.appendChild(el("span", "cnt", members.length.toLocaleString()));
+    wrap.appendChild(sec);
+
+    if (members.length > 12) {
+      var fbox = el("div", "member-filter");
+      var fin = el("input");
+      fin.type = "search";
+      fin.placeholder = "Filter members";
+      fin.value = sheetFilter;
+      fin.setAttribute("aria-label", "Filter members");
+      fin.addEventListener("input", function () { sheetFilter = fin.value; refreshMembers(c); });
+      fbox.appendChild(fin);
+      wrap.appendChild(fbox);
+    }
+
+    var list = el("div", "members");
+    list.id = "membersList";
+    fillMembers(list, members, sheetFilter.trim().toLowerCase());
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  /* ===================== in-conversation find ===========================
+     Keyword search scoped to the open thread via `archive_search` with a
+     conversation id. Results jump to the message in its transcript context. */
+
+  var findbarEl = $("findbar"), findqEl = $("findq"), findResultsEl = $("findResults"),
+      findCountEl = $("findCount");
+  var findTimer = null, findSeq = 0, findHits = [], findSel = -1;
+
+  function openFind() {
+    if (!state.active) return;
+    findbarEl.classList.add("show");
+    findqEl.focus();
+    findqEl.select();
+  }
+  function closeFind() {
+    findbarEl.classList.remove("show");
+    findResultsEl.classList.remove("show");
+    findResultsEl.textContent = "";
+    findqEl.value = "";
+    findCountEl.textContent = "";
+    findHits = []; findSel = -1; findSeq++;
+    clearTimeout(findTimer);
+  }
+  function toggleFind() {
+    if (findbarEl.classList.contains("show")) closeFind(); else openFind();
+  }
+
+  function onFindInput() {
+    clearTimeout(findTimer);
+    var q = findqEl.value.trim();
+    if (!q) {
+      findResultsEl.classList.remove("show");
+      findResultsEl.textContent = "";
+      findCountEl.textContent = "";
+      findHits = []; findSel = -1;
+      return;
+    }
+    findTimer = setTimeout(function () { runFind(q); }, 200);
+  }
+
+  async function runFind(q) {
+    if (!state.active) return;
+    var mine = ++findSeq;
+    var cid = state.active;
+    var hits = await call("archive_search", { query: q, conversationId: cid, limit: 60 });
+    if (mine !== findSeq || findqEl.value.trim() !== q || state.active !== cid) return;
+    findHits = Array.isArray(hits) ? hits : [];
+    findSel = findHits.length ? 0 : -1;
+    renderFindResults(q);
+  }
+
+  function renderFindResults(q) {
+    findResultsEl.textContent = "";
+    if (!findHits.length) {
+      findResultsEl.appendChild(el("div", "find-empty", "No matches in this conversation."));
+      findCountEl.textContent = "0";
+      findResultsEl.classList.add("show");
+      updateFindNav();
+      return;
+    }
+    findHits.forEach(function (h, i) {
+      var sender = fld(h, "sender_name", "senderName") || "Someone";
+      var when = fld(h, "created_at", "createdAt");
+      var b = el("button", "find-result" + (i === findSel ? " sel" : ""));
+      b.type = "button";
+      b.setAttribute("role", "option");
+      var top = el("div", "fr-top");
+      top.appendChild(el("span", "fr-who", sender));
+      top.appendChild(el("span", "fr-when", relTime(when)));
+      b.appendChild(top);
+      b.appendChild(highlightInto(el("div", "fr-text"), snippet(h.text, q), q));
+      b.addEventListener("click", function () { findSel = i; jumpToFindHit(); });
+      findResultsEl.appendChild(b);
+    });
+    findResultsEl.classList.add("show");
+    updateFindNav();
+  }
+
+  function updateFindNav() {
+    $("findPrev").disabled = findSel <= 0;
+    $("findNext").disabled = findSel < 0 || findSel >= findHits.length - 1;
+    if (findHits.length && findSel >= 0) {
+      findCountEl.textContent = (findSel + 1) + " / " + (findHits.length >= 60 ? "60+" : findHits.length);
+    } else if (findHits.length) {
+      findCountEl.textContent = findHits.length >= 60 ? "60+" : String(findHits.length);
+    }
+  }
+
+  function paintFindSel() {
+    var nodes = findResultsEl.querySelectorAll(".find-result");
+    for (var i = 0; i < nodes.length; i++) nodes[i].classList.toggle("sel", i === findSel);
+    if (nodes[findSel]) nodes[findSel].scrollIntoView({ block: "nearest" });
+  }
+
+  function stepFind(dir) {
+    if (!findHits.length) return;
+    var next = findSel + dir;
+    if (next < 0 || next >= findHits.length) return;
+    findSel = next;
+    paintFindSel();
+    updateFindNav();
+    jumpToFindHit();
+  }
+
+  function jumpToFindHit() {
+    if (findSel < 0 || findSel >= findHits.length) return;
+    var h = findHits[findSel];
+    var mid = fld(h, "message_id", "messageId");
+    var cid = fld(h, "conversation_id", "conversationId") || state.active;
+    if (mid == null) return;
+    paintFindSel();
+    updateFindNav();
+    // Ids stay strings the whole way. goToMessage scrolls if the row is loaded,
+    // otherwise reopens the conversation anchored on it.
+    goToMessage(String(mid), String(cid));
+  }
+
+  /* ===================== jump to a date =================================
+     A native date control; the chosen day is resolved to a message id via
+     `archive_message_near_date`, then opened as an anchored view. */
+
+  var datePickEl = null;
+
+  function ensureDatePop() {
+    if (datePickEl) return;
+    datePop.textContent = "";
+    datePop.appendChild(el("div", "dp-label", "Jump to on or before"));
+    datePickEl = el("input");
+    datePickEl.type = "date";
+    datePickEl.setAttribute("aria-label", "Choose a date");
+    datePop.appendChild(datePickEl);
+    var go = el("button", "dp-go", "Go to date");
+    go.type = "button";
+    go.addEventListener("click", jumpToDate);
+    datePop.appendChild(go);
+    datePickEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); jumpToDate(); }
+    });
+  }
+
+  function openDatePop(anchor) {
+    if (!state.active) return;
+    ensureDatePop();
+    placePop(datePop, anchor);
+    setTimeout(function () { try { datePickEl.focus(); } catch (e) { /* ignore */ } }, 0);
+  }
+
+  async function jumpToDate() {
+    if (!datePickEl || !datePickEl.value || !state.active) { closePops(); return; }
+    var parts = datePickEl.value.split("-");
+    // Local end of the chosen day, in epoch seconds — an ordinary number, not an
+    // id — so the newest message on that day or earlier is returned.
+    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 23, 59, 59);
+    var beforeUnix = Math.floor(d.getTime() / 1000);
+    var cid = state.active;
+    closePops();
+    var mid = await call("archive_message_near_date", { conversationId: cid, beforeUnix: beforeUnix });
+    if (mid == null) { toast("No messages on or before that date."); return; }
+    openConversation(cid, String(mid));
   }
 
   /* ============================== realtime =============================== */
@@ -3860,7 +4854,13 @@
   $("brandMark").appendChild(icon("logo"));
   $("emptyMark").appendChild(icon("logo"));
   $("back").appendChild(icon("back"));
+  $("toFind").appendChild(icon("search"));
+  $("toDate").appendChild(icon("calendar"));
   $("toLatest").appendChild(icon("jump"));
+  $("toSettings").appendChild(icon("cog"));
+  $("findPrev").appendChild(icon("up"));
+  $("findNext").appendChild(icon("caret"));
+  $("findClose").appendChild(icon("x"));
   $("ctxX").appendChild(icon("x"));
   attachBtn.appendChild(icon("image"));
   sendBtn.appendChild(icon("send"));
@@ -3879,6 +4879,27 @@
   $("toLatest").addEventListener("click", function () {
     if (state.anchored && state.active) openConversation(state.active);
     else { scrollToBottom(); if (state.active) markRead(state.active); }
+  });
+
+  // Header identity and gear both open the conversation settings panel.
+  $("headId").addEventListener("click", function () { if (state.active) openConvSettings(state.active); });
+  $("toSettings").addEventListener("click", function () { if (state.active) openConvSettings(state.active); });
+  $("toFind").addEventListener("click", toggleFind);
+  $("toDate").addEventListener("click", function (e) { openDatePop(e.currentTarget); });
+
+  $("findClose").addEventListener("click", closeFind);
+  $("findPrev").addEventListener("click", function () { stepFind(-1); });
+  $("findNext").addEventListener("click", function () { stepFind(1); });
+  findqEl.addEventListener("input", onFindInput);
+  findqEl.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.stopPropagation(); closeFind(); return; }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (findHits.length) { if (findSel < 0) findSel = 0; jumpToFindHit(); }
+      return;
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); stepFind(1); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); stepFind(-1); return; }
   });
 
   $("ctxX").addEventListener("click", function () {
@@ -3943,7 +4964,9 @@
 
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
-      if (emojiPop.classList.contains("show") || menuPop.classList.contains("show")) { closePops(); return; }
+      if (emojiPop.classList.contains("show") || menuPop.classList.contains("show") ||
+          datePop.classList.contains("show") || convSheet.classList.contains("show")) { closePops(); return; }
+      if (findbarEl.classList.contains("show")) { closeFind(); return; }
       if (bannerEl.classList.contains("show")) { showBanner(null); return; }
       if (qEl.value) { clearSearch(); qEl.blur(); }
       return;

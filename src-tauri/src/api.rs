@@ -43,6 +43,30 @@ struct ReadReceiptsPage {
 }
 
 pub const DEFAULT_BASE_URL: &str = "https://api.groupme.com/v3";
+
+/// The origin the web client runs on. Attached to every API request as
+/// `Origin`/`Referer` so the request presents the same application context the
+/// user's web session does.
+///
+/// This matters on networks with a filtering proxy that allowlists the GroupMe
+/// *web app* rather than the bare API host. Verified on such a network (Techloq):
+/// `GET /v3/groups` with only our auth headers was redirected to the filter's
+/// block page and answered as HTML, while the identical request issued from a
+/// `web.groupme.com` page — same URL, same `x-access-token`, same
+/// `x-requested-with` — returned 200 JSON. The one difference was the
+/// `Origin`/`Referer`/browser `User-Agent` the page attaches automatically, so
+/// the worker now attaches them too. It is the same account fetching the same
+/// data the browser already shows; the headers declare the application context
+/// the allowlist is keyed to, they do not change what is requested.
+const WEB_ORIGIN: &str = "https://web.groupme.com";
+const WEB_REFERER: &str = "https://web.groupme.com/";
+
+/// Honest identification. An earlier version impersonated Chrome to try to slip
+/// past a content filter; that neither worked (the filter keys on the process,
+/// not the UA) nor was the right thing — a filter allowing the app should be
+/// able to see it *is* the app. So it names itself.
+const WEB_USER_AGENT: &str =
+    "GroupMeDesktop (Windows; +https://github.com/Shalom-Karr/groupme-windows)";
 /// Image upload is not on `api.groupme.com` at all, and takes raw bytes rather
 /// than JSON. A field rather than a literal so tests can point it at wiremock.
 pub const DEFAULT_UPLOAD_URL: &str = "https://image.groupme.com/pictures";
@@ -123,6 +147,11 @@ pub struct GroupMeClient {
     /// Base delay in ms for exponential backoff (1 s, 2 s, 4 s).
     /// Tests set this to 0 so retries don't actually sleep.
     base_delay_ms: u64,
+    /// Fallback for when a GET is answered by a filtering proxy instead of the
+    /// API (see [`intercepting_host`]). `None` on an unfiltered network and in
+    /// tests, so the proxy webview is never created for anyone who does not hit
+    /// interception. Set by `lib.rs` after the app handle exists.
+    proxy: Option<crate::proxy::ApiProxy>,
 }
 
 impl GroupMeClient {
@@ -135,14 +164,67 @@ impl GroupMeClient {
         token: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Result<Self, ApiError> {
-        let client = Client::builder().user_agent("GroupMeDesktop/0.1").build()?;
+        let client = Client::builder().user_agent(WEB_USER_AGENT).build()?;
         Ok(Self {
             client,
             token: token.into(),
             base_url: base_url.into(),
             upload_url: DEFAULT_UPLOAD_URL.to_string(),
             base_delay_ms: 1000,
+            proxy: None,
         })
+    }
+
+    /// Attaches the browser-context fallback used when the network filters direct
+    /// API calls. Builder-style so the many existing constructor call sites and
+    /// the whole test suite stay unchanged (they simply run with no proxy).
+    pub fn with_proxy(mut self, proxy: crate::proxy::ApiProxy) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// Builds a full URL string with encoded query params — needed because the
+    /// proxy fetches by URL, so the query cannot live only in a `reqwest`
+    /// builder that never yields its string.
+    fn query_url(&self, path: &str, params: &[(&str, &str)]) -> Result<String, ApiError> {
+        reqwest::Url::parse_with_params(&self.api_url(path), params)
+            .map(|u| u.to_string())
+            .map_err(|e| ApiError::Decode(format!("building {path} url: {e}")))
+    }
+
+    /// A GET that falls back to the browser-context proxy on interception.
+    ///
+    /// Direct `reqwest` first — the fast path everyone but a filtered user takes.
+    /// Only when the response is detected as coming from a filter (a foreign
+    /// host, or HTML where JSON was due) is the identical URL re-fetched through
+    /// the web session, which the filter permits. With no proxy configured, the
+    /// interception is surfaced as itself so the archive never silently drops the
+    /// content. Returns the raw body for the caller to deserialise.
+    async fn get_json(&self, full_url: &str, ctx: &str) -> Result<String, ApiError> {
+        let resp = self.send_with_retry(|| self.authed_get(full_url)).await?;
+        let final_url = resp.url().to_string();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+
+        let Some(host) = intercepting_host(full_url, &final_url, &body) else {
+            return Ok(body);
+        };
+        match &self.proxy {
+            Some(proxy) => {
+                log::info!("{ctx} intercepted by {host}; retrying through the web session");
+                let r = proxy
+                    .fetch(full_url, &self.token)
+                    .await
+                    .map_err(|e| ApiError::Decode(format!("proxy fetch for {ctx}: {e}")))?;
+                Ok(r.body)
+            }
+            None => Err(ApiError::Intercepted {
+                path: ctx.to_string(),
+                host,
+            }),
+        }
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -159,11 +241,35 @@ impl GroupMeClient {
         }
     }
 
-    /// Attaches the two auth headers GroupMe requires. The token never goes in
-    /// the query string — the web client sends it as a header, and so do we.
+    /// `v2.groupme.com` is a **different host**, not a path prefix — mute, leave
+    /// and sign-in live there (docs §1.1, §7.3). Derived from `base_url` so a
+    /// mock server (whose base carries no `/v3` suffix) still routes to itself:
+    /// only the real `https://api.groupme.com/v3` base is rewritten to the v2
+    /// host.
+    fn v2_url(&self, path: &str) -> String {
+        match self.base_url.strip_suffix("/v3") {
+            Some(root) => format!("{}{path}", root.replace("://api.", "://v2.")),
+            None => format!("{}{path}", self.base_url),
+        }
+    }
+
+    /// Attaches the auth headers GroupMe requires, plus the web app's
+    /// `Origin`/`Referer` so the request carries the same application context a
+    /// browser session does. The token never goes in the query string — the web
+    /// client sends it as a header, and so do we. See [`WEB_ORIGIN`].
+    ///
+    /// Skipped when the base URL is not the real host, so the test suite's
+    /// wiremock server is not sent a mismatched `Origin` it never expects.
     fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        req.header("x-access-token", &self.token)
-            .header("x-requested-with", "GroupMeWeb/1.2.3")
+        let req = req
+            .header("x-access-token", &self.token)
+            .header("x-requested-with", "GroupMeWeb/1.2.3");
+        if self.base_url.starts_with("https://api.groupme.com") {
+            req.header("Origin", WEB_ORIGIN)
+                .header("Referer", WEB_REFERER)
+        } else {
+            req
+        }
     }
 
     fn authed_get(&self, url: &str) -> reqwest::RequestBuilder {
@@ -253,53 +359,49 @@ impl GroupMeClient {
         self.paginate("/chats").await
     }
 
+    /// `GET /v3/groups/{id}?include=members` → the whole group object with its
+    /// members restored (docs §4.2). Returned as the raw `response` value so the
+    /// UI can render a settings panel without this layer modelling every field.
+    ///
+    /// Routed through `get_json` so it takes the same browser-context proxy
+    /// fallback as the group list when a network filter intercepts the direct
+    /// call.
+    pub async fn group_detail(&self, group_id: &str) -> Result<Value, ApiError> {
+        let path = format!("/groups/{group_id}");
+        let url = self.query_url(&path, &[("include", "members")])?;
+        let body = self.get_json(&url, &path).await?;
+        let env: Envelope<Value> = serde_json::from_str(&body).map_err(|e| {
+            ApiError::Decode(format!(
+                "{path} ({} bytes): {e}; body starts: {:?}",
+                body.len(),
+                body.chars().take(120).collect::<String>()
+            ))
+        })?;
+        env.response
+            .ok_or_else(|| ApiError::Decode(format!("null response for {path}")))
+    }
+
     async fn paginate<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, ApiError>
     where
         Vec<T>: Default,
     {
         let mut all: Vec<T> = Vec::new();
-        let url = self.api_url(path);
         let mut page = 1u32;
         loop {
             let page_str = page.to_string();
-            let resp = self
-                .send_with_retry(|| {
-                    self.authed_get(&url)
-                        .query(&[("per_page", "100"), ("page", page_str.as_str())])
-                })
-                .await?;
-            // Parsed from text rather than straight off the response so an empty
-            // first page can say why. A list endpoint answering 200 with nothing
-            // is indistinguishable, downstream, from an account that owns no
-            // groups — and that ambiguity hid every group vanishing from the
-            // archive with no error anywhere.
-            let status = resp.status();
-            // The *final* URL, after any redirect reqwest followed. A body of
-            // HTML on a 200 usually means the request ended up somewhere other
-            // than the API, and the requested URL alone cannot show that.
-            let final_url = resp.url().to_string();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| ApiError::Decode(e.to_string()))?;
+            let url = self.query_url(path, &[("per_page", "100"), ("page", &page_str)])?;
+            // Direct first, browser-proxy on interception — see `get_json`. This
+            // is where every group used to vanish: the filter answered `/groups`
+            // with its block page, which decoded to an empty list that looked
+            // exactly like an account owning no groups.
+            let body = self.get_json(&url, path).await?;
 
-            // A different host answering, or an HTML body, means this never
-            // reached the API. Distinguished before parsing so the failure is
-            // reported as interception rather than as malformed JSON.
-            if let Some(host) = intercepting_host(&url, &final_url, &body) {
-                return Err(ApiError::Intercepted {
-                    path: path.to_string(),
-                    host,
-                });
-            }
-            // The status and a body excerpt go into the error itself. A bare
-            // "expected value at line 1 column 1" is true of an empty body, an
-            // HTML error page and a gzip frame alike, and says nothing about
-            // which — that ambiguity cost a full debugging pass.
+            // The body excerpt goes into the error itself. A bare "expected value
+            // at line 1 column 1" is true of an empty body, an HTML page and a
+            // gzip frame alike, and says nothing about which.
             let env: Envelope<Vec<T>> = serde_json::from_str(&body).map_err(|e| {
                 ApiError::Decode(format!(
-                    "{path} page {page} (HTTP {status}, {} bytes, final url {final_url}): {e}; \
-                     body starts: {:?}",
+                    "{path} page {page} ({} bytes): {e}; body starts: {:?}",
                     body.len(),
                     body.chars().take(120).collect::<String>()
                 ))
@@ -307,10 +409,7 @@ impl GroupMeClient {
             let items: Vec<T> = env.response.unwrap_or_default();
             let n = items.len();
             if page == 1 && n == 0 {
-                log::warn!(
-                    "{path} returned no items on page 1 (HTTP {status}): {}",
-                    body.chars().take(400).collect::<String>()
-                );
+                log::warn!("{path} returned no items on page 1");
             }
             all.extend(items);
             if n < MAX_PAGE_LIMIT as usize {
@@ -331,13 +430,15 @@ impl GroupMeClient {
         group_id: &str,
         cursor: &Cursor,
     ) -> Result<Vec<Message>, ApiError> {
-        let url = self.api_url(&format!("/groups/{group_id}/messages"));
-        let resp = self
-            .send_with_retry(|| {
-                apply_cursor(self.authed_get(&url).query(&[("limit", "100")]), cursor)
-            })
-            .await?;
-        let page: GroupMessagesPage = decode_envelope(resp).await?;
+        let path = format!("/groups/{group_id}/messages");
+        let mut params = vec![("limit", "100")];
+        cursor_params(cursor, &mut params);
+        let url = self.query_url(&path, &params)?;
+        // Group history is blocked by the same filter as the group list, so this
+        // takes the proxy fallback too — otherwise the messages behind every
+        // group name would still be missing even once the names arrive.
+        let body = self.get_json(&url, &path).await?;
+        let page: GroupMessagesPage = decode_body(&body)?;
         let mut msgs = page.messages;
         sort_ascending(&mut msgs);
         Ok(msgs)
@@ -351,17 +452,14 @@ impl GroupMeClient {
         other_user_id: &str,
         cursor: &Cursor,
     ) -> Result<Vec<Message>, ApiError> {
-        let url = self.api_url("/direct_messages");
-        let resp = self
-            .send_with_retry(|| {
-                apply_cursor(
-                    self.authed_get(&url)
-                        .query(&[("other_user_id", other_user_id), ("limit", "100")]),
-                    cursor,
-                )
-            })
-            .await?;
-        let page: DirectMessagesPage = decode_envelope(resp).await?;
+        let mut params = vec![("other_user_id", other_user_id), ("limit", "100")];
+        cursor_params(cursor, &mut params);
+        let url = self.query_url("/direct_messages", &params)?;
+        // DMs are not blocked on the observed filter, but routing them the same
+        // way costs nothing (the proxy is only touched on actual interception)
+        // and means one code path rather than two that can drift.
+        let body = self.get_json(&url, "/direct_messages").await?;
+        let page: DirectMessagesPage = decode_body(&body)?;
         let mut msgs = page.direct_messages;
         sort_ascending(&mut msgs);
         Ok(msgs)
@@ -621,6 +719,53 @@ impl GroupMeClient {
             .filter(|u| !u.is_empty())
             .ok_or_else(|| ApiError::Decode("upload returned no url".into()))
     }
+
+    /// `POST v2.groupme.com/groups/{group_id}/memberships/{membership_id}/destroy`
+    /// → **200**, `response: null` (docs §7.3). This is how the account leaves a
+    /// group; it takes the *membership* id, not the user id (docs §7.1).
+    ///
+    /// No request body and no envelope worth reading — only the status matters.
+    pub async fn leave_group(&self, group_id: &str, membership_id: &str) -> Result<(), ApiError> {
+        let url = self.v2_url(&format!(
+            "/groups/{group_id}/memberships/{membership_id}/destroy"
+        ));
+        let resp = self
+            .send_with_retry(|| self.authed(self.client.post(&url)))
+            .await?;
+        expect_status(resp, StatusCode::OK).await?;
+        Ok(())
+    }
+
+    /// Block (`POST /v3/blocks` → **201**) or unblock (`DELETE /v3/blocks` →
+    /// **200**, zero-length body) a user (docs §7.5).
+    ///
+    /// Both parameters are query-string, and `otherUser` is genuinely camelCase
+    /// — one of only two such parameters in the API. `user` is the caller's own
+    /// id. The unblock body is never read: it is empty, and decoding it as JSON
+    /// is exactly what breaks on this documented envelope-escape.
+    pub async fn set_block(
+        &self,
+        my_user_id: &str,
+        other_user_id: &str,
+        blocked: bool,
+    ) -> Result<(), ApiError> {
+        let url = self.query_url(
+            "/blocks",
+            &[("user", my_user_id), ("otherUser", other_user_id)],
+        )?;
+        if blocked {
+            let resp = self
+                .send_with_retry(|| self.authed(self.client.post(&url)))
+                .await?;
+            expect_status(resp, StatusCode::CREATED).await?;
+        } else {
+            let resp = self
+                .send_with_retry(|| self.authed(self.client.delete(&url)))
+                .await?;
+            expect_status(resp, StatusCode::OK).await?;
+        }
+        Ok(())
+    }
 }
 
 /// `POST /v3/groups/{id}/messages` and `PUT /v4/groups/{id}/messages/{id}`.
@@ -680,13 +825,24 @@ async fn decode_required<T: DeserializeOwned>(resp: Response) -> Result<T, ApiEr
         .ok_or_else(|| ApiError::Decode("null response where a body was required".into()))
 }
 
-fn apply_cursor(req: reqwest::RequestBuilder, cursor: &Cursor) -> reqwest::RequestBuilder {
+/// The cursor as query params, for the URL-string path used by `get_json`.
+fn cursor_params<'a>(cursor: &'a Cursor, params: &mut Vec<(&'static str, &'a str)>) {
     match cursor {
-        Cursor::Latest => req,
-        Cursor::Before(id) => req.query(&[("before_id", id.as_str())]),
-        Cursor::After(id) => req.query(&[("after_id", id.as_str())]),
-        Cursor::Since(id) => req.query(&[("since_id", id.as_str())]),
+        Cursor::Latest => {}
+        Cursor::Before(id) => params.push(("before_id", id)),
+        Cursor::After(id) => params.push(("after_id", id)),
+        Cursor::Since(id) => params.push(("since_id", id)),
     }
+}
+
+/// Decodes an already-read body as `Envelope<T>`, tolerating `"response": null`
+/// as `T::default()` — the backfill terminator. The body-string analogue of
+/// [`decode_envelope`], for callers that read the text first (to allow the
+/// interception check and proxy fallback).
+fn decode_body<T: DeserializeOwned + Default>(body: &str) -> Result<T, ApiError> {
+    let env: Envelope<T> =
+        serde_json::from_str(body).map_err(|e| ApiError::Decode(e.to_string()))?;
+    Ok(env.response.unwrap_or_default())
 }
 
 fn sort_ascending(msgs: &mut [Message]) {
@@ -1142,6 +1298,13 @@ mod tests {
         );
         assert_eq!(c.api_url("/chats"), "https://api.groupme.com/v3/chats");
 
+        // `v2.groupme.com` is a different host, derived from the real base by
+        // swapping the `api.` host label — not a path prefix like `/v4`.
+        assert_eq!(
+            c.v2_url("/groups/1/memberships/2/destroy"),
+            "https://v2.groupme.com/groups/1/memberships/2/destroy"
+        );
+
         // A base without the version suffix — a mock server — is used verbatim,
         // which is what lets both prefixes land on the same wiremock instance.
         let c = GroupMeClient::with_base_url("t", "http://127.0.0.1:9").unwrap();
@@ -1149,6 +1312,93 @@ mod tests {
             c.v4_url("/read_receipts/1"),
             "http://127.0.0.1:9/read_receipts/1"
         );
+        assert_eq!(
+            c.v2_url("/groups/1/memberships/2/destroy"),
+            "http://127.0.0.1:9/groups/1/memberships/2/destroy"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // group_detail() / leave_group() / set_block()
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn group_detail_requests_members_and_returns_the_raw_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/groups/{GROUP}")))
+            .and(query_param("include", "members"))
+            .and(header("x-access-token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "meta": {"code": 200},
+                "response": {"id": GROUP, "name": "Example Group",
+                    "members": [{"id": "1000000001", "user_id": USER, "nickname": "Me"}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let detail = client(&server).group_detail(GROUP).await.unwrap();
+        assert_eq!(detail["id"], GROUP);
+        assert_eq!(detail["members"][0]["user_id"], USER);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_group_posts_the_membership_destroy_and_accepts_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/groups/{GROUP}/memberships/1000000001/destroy"
+            )))
+            .and(header("x-access-token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "meta": {"code": 200}, "response": null
+            })))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .leave_group(GROUP, "1000000001")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocking_posts_to_blocks_with_camelcase_other_user_and_expects_201() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/blocks"))
+            .and(query_param("user", USER))
+            .and(query_param("otherUser", "20000003"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "meta": {"code": 201},
+                "response": {"block": {"user_id": USER, "blocked_user_id": "20000003"}}
+            })))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .set_block(USER, "20000003", true)
+            .await
+            .unwrap();
+    }
+
+    /// The unblock is a `DELETE` returning `200` with a zero-length body — the
+    /// documented envelope-escape. It must not be parsed as JSON.
+    #[tokio::test]
+    async fn unblocking_deletes_blocks_and_tolerates_an_empty_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/blocks"))
+            .and(query_param("user", USER))
+            .and(query_param("otherUser", "20000003"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .set_block(USER, "20000003", false)
+            .await
+            .unwrap();
     }
 
     // -------------------------------------------------------------------------

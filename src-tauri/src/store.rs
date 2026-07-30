@@ -29,7 +29,7 @@ fn now_unix() -> i64 {
 }
 
 /// Bump only alongside a matching arm in `migrate`.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// v2 adds server read state to `conversations`.
 ///
@@ -44,8 +44,28 @@ const SCHEMA_V2: &[&str] = &[
     "ALTER TABLE conversations ADD COLUMN last_read_at INTEGER",
 ];
 
+/// v3 adds local pin ordering and a local mute flag to `conversations`. Both are
+/// this app's own state — neither is synced from GroupMe — so they live only
+/// here. Same in-place `ALTER TABLE` reasoning as [`SCHEMA_V2`]: an existing
+/// archive gains the columns without a rebuild, while `SCHEMA_V1` also declares
+/// them so a fresh database is correct without running these, and the
+/// "duplicate column name" error on that path is ignored individually.
+const SCHEMA_V3: &[&str] = &[
+    "ALTER TABLE conversations ADD COLUMN pin_rank INTEGER",
+    "ALTER TABLE conversations ADD COLUMN muted INTEGER NOT NULL DEFAULT 0",
+];
+
 pub struct Store {
     conn: Connection,
+}
+
+/// Conversation and message totals split by conversation kind.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct KindCounts {
+    pub groups: usize,
+    pub dms: usize,
+    pub group_messages: i64,
+    pub dm_messages: i64,
 }
 
 /// How much of a conversation's history we have, and where the cursors sit.
@@ -135,6 +155,15 @@ impl Store {
             // error ignored, so a half-applied migration from an interrupted
             // run completes instead of failing on the column it already added.
             for stmt in SCHEMA_V2 {
+                let _ = tx.execute(stmt, []);
+            }
+        }
+        if current >= 1 {
+            // v1/v2 -> v3: pin ordering and the mute flag. Same
+            // ignore-per-statement handling as SCHEMA_V2 — a fresh database
+            // already carries these from SCHEMA_V1, and an existing archive that
+            // somehow already has one column must still gain the other.
+            for stmt in SCHEMA_V3 {
                 let _ = tx.execute(stmt, []);
             }
         }
@@ -307,9 +336,13 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, name, image_url, updated_at, messages_count,
                     last_message_text, last_message_created_at,
-                    unread_count, last_read_message_id
+                    unread_count, last_read_message_id,
+                    pin_rank, muted
              FROM conversations
-             ORDER BY COALESCE(last_message_created_at, updated_at) DESC",
+             -- Pinned first (NULL pin_rank sorts last), then by rank, then by the
+             -- existing recency ordering within each tier.
+             ORDER BY (pin_rank IS NULL), pin_rank,
+                      COALESCE(last_message_created_at, updated_at) DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Conversation {
@@ -324,6 +357,8 @@ impl Store {
                 last_message_created_at: r.get(7)?,
                 unread_count: r.get(8)?,
                 last_read_message_id: r.get(9)?,
+                pin_rank: r.get(10)?,
+                muted: r.get::<_, i64>(11)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -384,6 +419,99 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?)
+    }
+
+    /// Conversation and message totals split by kind, so the sync panel can show
+    /// groups and DMs separately — which matters when one is fully archived and
+    /// the other is blocked by a network filter.
+    pub fn counts_by_kind(&self) -> Result<KindCounts> {
+        let conv = |kind: &str| -> Result<usize> {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM conversations WHERE kind = ?1",
+                params![kind],
+                |r| r.get(0),
+            )?)
+        };
+        let msgs = |kind: &str| -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM messages m
+                 JOIN conversations c ON c.id = m.conversation_id
+                 WHERE c.kind = ?1",
+                params![kind],
+                |r| r.get(0),
+            )?)
+        };
+        Ok(KindCounts {
+            groups: conv("group")?,
+            dms: conv("dm")?,
+            group_messages: msgs("group")?,
+            dm_messages: msgs("dm")?,
+        })
+    }
+
+    // ----------------------------------------------------- pins and mute
+
+    /// Set (or clear, with `None`) a conversation's local pin rank.
+    pub fn set_pin(&self, conversation_id: &str, rank: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE conversations SET pin_rank = ?2 WHERE id = ?1",
+            params![conversation_id, rank],
+        )?;
+        Ok(())
+    }
+
+    /// Assigns `pin_rank` 0..n to `ordered_ids` in order, in one transaction.
+    /// Conversations not named here keep whatever pin state they already have —
+    /// clearing them is deliberately not this method's job.
+    pub fn reorder_pins(&mut self, ordered_ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE conversations SET pin_rank = ?2 WHERE id = ?1")?;
+            for (i, id) in ordered_ids.iter().enumerate() {
+                stmt.execute(params![id, i as i64])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Set the local mute flag on a conversation.
+    pub fn set_mute(&self, conversation_id: &str, muted: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE conversations SET muted = ?2 WHERE id = ?1",
+            params![conversation_id, muted as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a conversation is locally muted. A conversation we do not hold is
+    /// not muted (rather than an error), so a notification for one still shows.
+    pub fn is_muted(&self, conversation_id: &str) -> Result<bool> {
+        let muted: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT muted FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(muted.unwrap_or(0) != 0)
+    }
+
+    /// The stored kind of a conversation, or `None` if we do not hold it. Lets a
+    /// command tell a group from a DM without the caller stating which — needed
+    /// because a DM is keyed by the other participant's bare user id, so its id
+    /// is shape-identical to a group id.
+    pub fn conversation_kind(&self, conversation_id: &str) -> Result<Option<ConversationKind>> {
+        let kind: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT kind FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(kind.as_deref().and_then(ConversationKind::parse))
     }
 
     // ------------------------------------------------------------ messages
@@ -557,6 +685,29 @@ impl Store {
         Ok(out)
     }
 
+    /// The id of the newest message in a conversation at or before `before_unix`
+    /// (compared on the stored `created_at`), for a "jump to date" picker.
+    ///
+    /// Returns the id as a **string**: GroupMe ids exceed 2^53 and must never be
+    /// parsed to a JS number. `None` when nothing in the conversation is that old.
+    pub fn message_near_date(
+        &self,
+        conversation_id: &str,
+        before_unix: i64,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM messages
+                 WHERE conversation_id = ?1 AND created_at <= ?2
+                 ORDER BY created_at DESC, id_sort DESC
+                 LIMIT 1",
+                params![conversation_id, before_unix],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn message_count(&self, conversation_id: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
@@ -574,16 +725,28 @@ impl Store {
     /// Full-text search across the archive. This is the feature that makes it
     /// an archive rather than a cache.
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
+        self.search_scoped(query, None, limit)
+    }
+
+    /// [`Store::search`], optionally scoped to a single conversation. `None`
+    /// searches the whole archive; `Some(id)` restricts to that conversation.
+    pub fn search_scoped(
+        &self,
+        query: &str,
+        conversation_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SearchHit>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.conversation_id, c.name, m.name, m.text, m.created_at
              FROM messages_fts f
              JOIN messages m ON m.rowid = f.rowid
              LEFT JOIN conversations c ON c.id = m.conversation_id
              WHERE messages_fts MATCH ?1
+               AND (?2 IS NULL OR m.conversation_id = ?2)
              ORDER BY m.id_sort DESC
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![query, limit], |r| {
+        let rows = stmt.query_map(params![query, conversation_id, limit], |r| {
             Ok(SearchHit {
                 message_id: r.get(0)?,
                 conversation_id: r.get(1)?,
@@ -767,7 +930,11 @@ CREATE TABLE IF NOT EXISTS conversations (
     -- "already read".
     unread_count            INTEGER,
     last_read_message_id    TEXT,
-    last_read_at            INTEGER
+    last_read_at            INTEGER,
+    -- Local-only (v3): pin ordering and mute. Declared here so a fresh database
+    -- is correct without the SCHEMA_V3 ALTER; NULL pin_rank is unpinned.
+    pin_rank                INTEGER,
+    muted                   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -1362,6 +1529,264 @@ mod tests {
         let again = Store::open(&path).unwrap();
         assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(again.list_conversations().unwrap().len(), 1);
+    }
+
+    /// The v2 archive (read-state columns, but no pin/mute) must gain the v3
+    /// columns in place and keep its rows — the same in-place upgrade guarantee
+    /// as the v1 test above, one schema version on.
+    #[test]
+    fn a_v2_archive_upgrades_in_place_and_gains_pin_and_mute() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+
+        // Build a v2-shaped archive: read-state columns present, pin/mute absent.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT,
+                    description TEXT, image_url TEXT, creator_user_id TEXT,
+                    created_at INTEGER, updated_at INTEGER, messages_count INTEGER,
+                    last_message_id TEXT, last_message_text TEXT,
+                    last_message_created_at INTEGER, members_json TEXT,
+                    raw_json TEXT, synced_at INTEGER,
+                    unread_count INTEGER, last_read_message_id TEXT, last_read_at INTEGER
+                 );
+                 INSERT INTO conversations (id, kind, name, updated_at, unread_count)
+                 VALUES ('10000001','group','Kept',42,3);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let convos = s.list_conversations().unwrap();
+        assert_eq!(
+            convos.len(),
+            1,
+            "the existing row must survive the migration"
+        );
+        assert_eq!(convos[0].name.as_deref(), Some("Kept"));
+        // Pre-existing read state is untouched by the v3 migration.
+        assert_eq!(convos[0].unread_count, Some(3));
+        // The new columns arrive with their defaults: unpinned and unmuted.
+        assert_eq!(convos[0].pin_rank, None);
+        assert!(!convos[0].muted);
+
+        // The pin/mute writes work against the migrated row.
+        s.set_pin("10000001", Some(0)).unwrap();
+        s.set_mute("10000001", true).unwrap();
+        let c = &s.list_conversations().unwrap()[0];
+        assert_eq!(c.pin_rank, Some(0));
+        assert!(c.muted);
+    }
+
+    /// A pin overrides recency: a pinned conversation sorts above a more-recently
+    /// active unpinned one.
+    #[test]
+    fn a_pinned_conversation_sorts_above_a_more_recent_unpinned_one() {
+        let s = Store::open_in_memory().unwrap();
+        // Most-recently active, but not pinned.
+        s.upsert_chat(
+            &Chat {
+                updated_at: 9000,
+                other_user: OtherUser {
+                    id: "20000002".into(),
+                    name: Some("Recent Person".into()),
+                    avatar_url: None,
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        // Older, but pinned.
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                name: Some("Pinned".into()),
+                updated_at: 100,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        s.set_pin("10000001", Some(0)).unwrap();
+
+        let list = s.list_conversations().unwrap();
+        assert_eq!(
+            list[0].id, "10000001",
+            "the pinned conversation must sort first despite being older"
+        );
+        assert_eq!(list[0].pin_rank, Some(0));
+        assert_eq!(list[1].id, "20000002");
+        assert_eq!(list[1].pin_rank, None);
+    }
+
+    #[test]
+    fn reorder_pins_assigns_zero_through_n_in_the_given_order() {
+        let mut s = Store::open_in_memory().unwrap();
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            s.upsert_group(
+                &Group {
+                    id: (*id).into(),
+                    updated_at: 100 + i as i64,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        }
+        // Deliberately not the natural order.
+        s.reorder_pins(&["c".into(), "a".into(), "b".into()])
+            .unwrap();
+
+        let by_id: std::collections::HashMap<_, _> = s
+            .list_conversations()
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+        assert_eq!(by_id["c"].pin_rank, Some(0));
+        assert_eq!(by_id["a"].pin_rank, Some(1));
+        assert_eq!(by_id["b"].pin_rank, Some(2));
+
+        // And the list order follows the assigned ranks.
+        let order: Vec<String> = s
+            .list_conversations()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(order, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn mute_flag_round_trips_and_defaults_off() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 1,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert!(!s.is_muted("10000001").unwrap());
+        assert!(!s.list_conversations().unwrap()[0].muted);
+
+        s.set_mute("10000001", true).unwrap();
+        assert!(s.is_muted("10000001").unwrap());
+        assert!(s.list_conversations().unwrap()[0].muted);
+
+        // A conversation we do not hold is not muted, rather than an error.
+        assert!(!s.is_muted("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn set_pin_clears_with_none() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 1,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        s.set_pin("10000001", Some(5)).unwrap();
+        assert_eq!(s.list_conversations().unwrap()[0].pin_rank, Some(5));
+        s.set_pin("10000001", None).unwrap();
+        assert_eq!(s.list_conversations().unwrap()[0].pin_rank, None);
+    }
+
+    #[test]
+    fn conversation_kind_distinguishes_group_from_dm() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                updated_at: 1,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        s.upsert_chat(
+            &Chat {
+                updated_at: 1,
+                other_user: OtherUser {
+                    id: "20000002".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            s.conversation_kind("10000001").unwrap(),
+            Some(ConversationKind::Group)
+        );
+        assert_eq!(
+            s.conversation_kind("20000002").unwrap(),
+            Some(ConversationKind::Dm)
+        );
+        assert_eq!(s.conversation_kind("unknown").unwrap(), None);
+    }
+
+    #[test]
+    fn message_near_date_returns_the_newest_at_or_before_the_boundary() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages(
+            "10000001",
+            &[
+                msg("170000000000000001", "a", 1000),
+                msg("170000000000000002", "b", 2000),
+                msg("170000000000000003", "c", 3000),
+            ],
+        )
+        .unwrap();
+
+        // Exactly on a message's timestamp returns that message.
+        assert_eq!(
+            s.message_near_date("10000001", 2000).unwrap().as_deref(),
+            Some("170000000000000002")
+        );
+        // Between two returns the newer one that is still at or before.
+        assert_eq!(
+            s.message_near_date("10000001", 2500).unwrap().as_deref(),
+            Some("170000000000000002")
+        );
+        // After everything returns the newest.
+        assert_eq!(
+            s.message_near_date("10000001", 9999).unwrap().as_deref(),
+            Some("170000000000000003")
+        );
+        // Before everything returns nothing.
+        assert!(s.message_near_date("10000001", 500).unwrap().is_none());
+        // Scoped to the conversation.
+        assert!(s.message_near_date("other", 9999).unwrap().is_none());
+    }
+
+    #[test]
+    fn scoped_search_restricts_to_one_conversation() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.insert_messages("10000001", &[msg("1", "shared word here", 1)])
+            .unwrap();
+        s.insert_messages("10000002", &[msg("2", "shared word there", 2)])
+            .unwrap();
+
+        // Unscoped finds both.
+        assert_eq!(s.search("shared", 10).unwrap().len(), 2);
+        // Scoped finds only the one conversation's hit.
+        let hits = s.search_scoped("shared", Some("10000001"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].conversation_id, "10000001");
     }
 
     #[test]

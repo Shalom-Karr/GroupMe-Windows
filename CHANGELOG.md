@@ -2,6 +2,56 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.5.0] — 2026-07-30
+
+Conversation management, a denser client, and resilience against a network
+filter that blocks the API.
+
+### Added
+
+- **Per-conversation actions.** Each sidebar row and the new header settings
+  panel offer pin/unpin, reorder pins, mute/unmute, leave group, and block user.
+  Pinned conversations sort to the top in their own section. Pin, order and mute
+  are stored locally (schema v3), so they work offline and do not depend on the
+  API; leave and block are the captured GroupMe write endpoints.
+- **Group settings panel.** Clicking the conversation's name or avatar in the
+  header opens a panel; for a group it lists the roster from
+  `GET /v3/groups/{id}?include=members` with owner/admin badges and per-member
+  block, for a DM a lighter panel with block/mute.
+- **The header now shows the conversation's avatar and name** (group image or DM
+  avatar, with the same letter-plate fallback the sidebar uses).
+- **Date picker and in-conversation search.** The thread header gains a date
+  picker that jumps to a day (`archive_message_near_date`) and a search scoped to
+  the open conversation (`archive_search` with a conversation filter), with
+  jump-to-context. (Semantic search deferred.)
+- **Filter resilience.** On a network that blocks the API host, the app now
+  detects the interception (a foreign host or HTML where JSON was due) and says
+  so plainly instead of silently archiving nothing; offers a browser-context
+  proxy that retries through the web session (created lazily, so an unfiltered
+  machine never pays for it); and a tray item, "Allow API through content
+  filter…", that issues the request from inside the app so the user can approve
+  it in their filter.
+
+### Fixed
+
+- **Adding a reaction failed in DMs.** The like endpoint takes the `+`-joined DM
+  thread key, but the archive stores DMs under the other participant's bare id,
+  so `client_react`/`client_unreact` 404'd — the same key mismatch already fixed
+  for send and mark-read. They now resolve the composite key before calling.
+- **`mark_read` no longer surfaces an error.** It runs automatically on opening a
+  thread and legitimately fails (a group you have left answers `403 not a
+  member`; a filtered network blocks the write), so it is logged and ignored
+  rather than shown.
+- **Density.** The client's vertical rhythm was tightened throughout — header,
+  message list, sidebar, composer — so it reads as a chat client rather than a
+  roomy web page.
+
+### Changed
+
+- The sync-status panel splits **Groups** and **Direct messages** into their own
+  rows with per-kind message counts, and says plainly when groups are empty while
+  DMs are not — which on a filtered network means the group API is blocked.
+
 ## [0.4.1] — 2026-07-30
 
 Two bugs that only running the app could have found — including one that made

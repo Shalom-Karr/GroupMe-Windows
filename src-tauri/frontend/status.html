@@ -298,9 +298,17 @@
       </div>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Conversations</span>
+      <span class="stat-label">Groups</span>
       <div class="stat-value-wrap">
-        <span class="stat-value num" id="stat-conversations">—</span>
+        <span class="stat-value num" id="stat-groups">—</span>
+        <span class="stat-sub" id="stat-groups-sub"></span>
+      </div>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Direct messages</span>
+      <div class="stat-value-wrap">
+        <span class="stat-value num" id="stat-dms">—</span>
+        <span class="stat-sub" id="stat-dms-sub"></span>
       </div>
     </div>
     <div class="stat-row">
@@ -337,6 +345,7 @@
   var SAMPLE_STATS = {
     conversations: 42,
     messages: 1847,
+    groups: 12, dms: 30, group_messages: 1400, dm_messages: 447,
     last_sync_at: Math.floor(Date.now() / 1000) - 90,
     account_name: 'Sample User'
   };
@@ -421,7 +430,10 @@
   var elVerdictText   = document.getElementById('verdict-text');
   var elVerdictHint   = document.getElementById('verdict-hint');
   var elAccount       = document.getElementById('stat-account');
-  var elConvs         = document.getElementById('stat-conversations');
+  var elGroups        = document.getElementById('stat-groups');
+  var elGroupsSub     = document.getElementById('stat-groups-sub');
+  var elDms           = document.getElementById('stat-dms');
+  var elDmsSub        = document.getElementById('stat-dms-sub');
   var elMsgs          = document.getElementById('stat-messages');
   var elRelTime       = document.getElementById('stat-rel-time');
   var elAbsTime       = document.getElementById('stat-abs-time');
@@ -446,8 +458,23 @@
     _stats = stats;
     renderVerdict(stats);
     elAccount.textContent       = stats.account_name || '—';  // textContent — safe
-    elConvs.textContent         = fmtNum(stats.conversations);
-    elMsgs.textContent          = fmtNum(stats.messages);
+
+    var groups = stats.groups == null ? null : stats.groups;
+    var dms    = stats.dms == null ? null : stats.dms;
+    elGroups.textContent = fmtNum(groups);
+    elDms.textContent    = fmtNum(dms);
+    // Per-kind message counts as the sub-line, and — the reason this split
+    // exists — a plain-language note when groups are empty while DMs are not,
+    // which on this machine means a network filter is blocking the group API.
+    elGroupsSub.textContent =
+      (stats.group_messages != null ? fmtNum(stats.group_messages) + ' messages' : '');
+    elDmsSub.textContent =
+      (stats.dm_messages != null ? fmtNum(stats.dm_messages) + ' messages' : '');
+    if (groups === 0 && dms > 0) {
+      elGroupsSub.textContent = 'none archived — the group API may be blocked by a filter';
+    }
+
+    elMsgs.textContent = fmtNum(stats.messages);
     renderTime(stats.last_sync_at);
   }
 

@@ -21,6 +21,7 @@ pub mod client_commands;
 pub mod commands;
 pub mod connectivity;
 pub mod model;
+pub mod proxy;
 pub mod realtime;
 pub mod store;
 pub mod sync;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::archive_conversations,
             commands::archive_messages,
             commands::archive_search,
+            commands::archive_message_near_date,
             commands::archive_media_path,
             commands::archive_stats,
             client_commands::client_send_message,
@@ -110,6 +112,12 @@ pub fn run() {
             client_commands::client_typing,
             client_commands::client_ui_preference,
             client_commands::client_set_ui_preference,
+            client_commands::client_set_pin,
+            client_commands::client_reorder_pins,
+            client_commands::client_set_mute,
+            client_commands::client_group_detail,
+            client_commands::client_leave_group,
+            client_commands::client_set_block,
             tray::show_app_menu,
             updater::updater_check,
             updater::updater_download,
@@ -132,6 +140,11 @@ pub fn run() {
             app.manage(shared.clone());
             app.manage(client_commands::SharedClient::default());
             app.manage(RealtimeSlot::default());
+            // The browser-context API proxy, used only if a request is later
+            // seen to be intercepted by a network filter. Constructing it just
+            // installs a listener; the hidden webview is not created until the
+            // first interception, so an unfiltered machine never pays for it.
+            app.manage(proxy::new(app.handle().clone()));
 
             // Built here rather than declared in tauri.conf.json because an
             // initialization script can only be attached at window-build time.
@@ -473,7 +486,7 @@ fn start_sync(
             let token = token_rx.borrow_and_update().clone();
 
             let client = match api::GroupMeClient::new(token.clone()) {
-                Ok(c) => c,
+                Ok(c) => c.with_proxy(app.state::<proxy::ApiProxy>().inner().clone()),
                 Err(e) => {
                     log::error!("building api client: {e}");
                     return;
@@ -922,10 +935,7 @@ mod tests {
             let last_close = lower
                 .rfind("</script")
                 .expect("a page with <script> must close it");
-            assert!(
-                last_close >= body_start,
-                "{page}: malformed script tags"
-            );
+            assert!(last_close >= body_start, "{page}: malformed script tags");
             let inner = &lower[body_start..last_close];
             assert!(
                 !inner.contains("</script"),

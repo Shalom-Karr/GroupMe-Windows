@@ -190,11 +190,62 @@ pub fn open_status_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+const UNBLOCK_WINDOW: &str = "filter-unblock";
+const UNBLOCK_PAGE: &str = "unblock.html";
+
+/// Opens a small window that fires a request to `api.groupme.com` **from inside
+/// the app**, so a content filter sees the request coming from this app rather
+/// than a browser — the distinction that matters, since the filter can allow the
+/// browser while still blocking the app's own traffic.
+///
+/// A background HTTP call is invisible to the user and to the filter's
+/// interactive allow flow; putting the same request behind a button, in a real
+/// window, is what lets the filter surface it and lets the user approve it. The
+/// app never touches any PIN or the filter's settings — it only issues the
+/// request; the block, the prompt and the allow decision are entirely the
+/// filter's, operated by the user.
+pub fn open_filter_unblock(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window(UNBLOCK_WINDOW) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        UNBLOCK_WINDOW,
+        tauri::WebviewUrl::App(UNBLOCK_PAGE.into()),
+    )
+    .title("Allow GroupMe API through your content filter")
+    .inner_size(600.0, 480.0)
+    .center()
+    .build()?;
+
+    Ok(())
+}
+
 /// Fire an OS notification for a new message. Silently drops the toast when
-/// notifications are off, when the message is the user's own, or when the main
-/// window is focused.
-pub fn notify_message(app: &tauri::AppHandle, sender: &str, body: &str, conversation: &str) {
+/// notifications are off, when the conversation is locally muted, when the
+/// message is the user's own, or when the main window is focused.
+///
+/// `conversation_id` is the archive's conversation key (group id, or a DM's
+/// stored key) — used only to consult the local mute flag; `conversation` is the
+/// display name shown in the toast.
+pub fn notify_message(
+    app: &tauri::AppHandle,
+    conversation_id: &str,
+    sender: &str,
+    body: &str,
+    conversation: &str,
+) {
     if !NOTIFY.load(Ordering::Relaxed) {
+        return;
+    }
+    // A muted conversation raises no toast. Checked here so the suppression holds
+    // however the notification path is wired — the flag is local, set by
+    // `client_set_mute`.
+    if conversation_muted(app, conversation_id) {
         return;
     }
     if is_self_message(sender, account_name().as_deref()) {
@@ -278,6 +329,13 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
     let show_i = MenuItem::with_id(app, "show", "Show GroupMe", true, None::<&str>)?;
     let status_window_i =
         MenuItem::with_id(app, "sync_status", "Sync status…", true, None::<&str>)?;
+    let unblock_i = MenuItem::with_id(
+        app,
+        "filter_unblock",
+        "Allow API through content filter…",
+        true,
+        None::<&str>,
+    )?;
     let updates_i = MenuItem::with_id(
         app,
         "check_updates",
@@ -323,6 +381,7 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
             &sep1,
             &show_i,
             &status_window_i,
+            &unblock_i,
             &updates_i,
             &sep2,
             &notify_i,
@@ -344,6 +403,11 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
             "sync_status" => {
                 if let Err(e) = open_status_window(app) {
                     log::warn!("tray: could not open the sync status window: {e}");
+                }
+            }
+            "filter_unblock" => {
+                if let Err(e) = open_filter_unblock(app) {
+                    log::warn!("tray: could not open the filter-unblock window: {e}");
                 }
             }
             "check_updates" => {
@@ -647,6 +711,18 @@ fn account_name() -> Option<String> {
     let lock = HANDLES.get()?;
     let h = lock.lock().unwrap_or_else(|e| e.into_inner());
     h.account.clone()
+}
+
+/// Whether a conversation is locally muted. Fails open: if the store is
+/// unavailable or the read errors, the notification is allowed rather than
+/// silently swallowed. Not on the UI thread (the notify path runs off it), so a
+/// brief blocking lock for one indexed lookup is fine.
+fn conversation_muted(app: &tauri::AppHandle, conversation_id: &str) -> bool {
+    let Some(store) = app.try_state::<SharedStore>() else {
+        return false;
+    };
+    let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    guard.is_muted(conversation_id).unwrap_or(false)
 }
 
 fn main_window_focused(app: &tauri::AppHandle) -> bool {
