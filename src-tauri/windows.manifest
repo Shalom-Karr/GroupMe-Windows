@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows side-by-side manifest for every binary this crate produces — the app
+  and the test harnesses alike (see build.rs).
+
+  It requests Common-Controls version 6, which is exactly what tauri-build's
+  default manifest asks for. tauri embeds that manifest only into the app binary
+  (via winres); test binaries get nothing. But the library links window-creation
+  code — proxy.rs and the tray windows — whose wry dependency imports comctl32
+  v6 functions (TaskDialogIndirect, SetWindowSubclass, DefSubclassProc). A
+  manifest-less test binary binds comctl32 to the v5 side-by-side assembly, which
+  does not export those functions, so the loader aborts it with
+  STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before any test runs. Routing this one
+  manifest through the linker for all targets covers the tests without changing
+  what the shipped app requests.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*" />
+    </dependentAssembly>
+  </dependency>
+</assembly>

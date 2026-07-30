@@ -259,6 +259,34 @@ lints report.
 be rustfmt-clean, and the first CI run will die on formatting before it reaches a
 compile.
 
+**A Rust test binary carries no manifest, so comctl32 binds to v5.** Once the
+library linked window-creation code (`proxy.rs`, the tray windows), the test
+binary imported comctl32 *v6* functions — `TaskDialogIndirect`,
+`SetWindowSubclass`, `DefSubclassProc` — that the v5 side-by-side assembly does
+not export. A manifest-less test binary then fails to *launch* with
+`STATUS_ENTRYPOINT_NOT_FOUND` (`0xc0000139`) before a single test runs, while the
+app binary, which tauri gives a manifest, runs fine. The tell is exactly that
+split: `cargo run` works, `cargo test` dies on load. It is easy to misread as
+environmental and wave CI through — v0.5.0 shipped a commit message claiming just
+that, and CI was red on the very machine class the app targets.
+
+What it is *not*, so the days do not get spent there again: not the linker
+(`rust-lld` reproduced it identically), not binary size or section count (six
+sections; `debug=false` changed nothing), not a missing DLL (the DLL is present —
+only the *function* is absent in v5, so the import table looks clean). The fast
+diagnosis is to diff the failing test binary's imports against a known-good tag's
+(`dumpbin /imports`, sorted, `comm`); the v6 window imports are the smoking gun.
+
+The fix embeds the manifest for *every* target. cargo 1.96 rejects
+`rustc-link-arg-tests`, and a second `/MANIFEST:EMBED` on top of tauri's winres
+manifest collides (`LNK1123`), so: `WindowsAttributes::new_without_app_manifest()`
+stops tauri embedding it (icon and version resource stay), and
+`cargo::rustc-link-arg=/MANIFEST:EMBED` + `/MANIFESTINPUT:windows.manifest`
+embeds our own — identical to tauri's default, just the Common-Controls v6
+dependency — for the app bin and the test harnesses alike. One embed per binary.
+Verify with `mt.exe -inputresource:app.exe;#1`: the manifest must still show
+Common-Controls 6.0 and the `asInvoker` trustInfo link merges in.
+
 **The `paths:` filter is an allowlist.** Only pushes touching `src-tauri/**`,
 `package.json` or the workflow itself trigger a build — so documentation and
 tooling changes never cut a release. It is evaluated across *all* commits in a
