@@ -272,7 +272,9 @@ impl SyncEngine {
                     let guard = lock_store(&store);
                     let mut errors = Vec::new();
                     for g in &groups {
-                        if let Err(e) = guard.upsert_group(g, now) {
+                        // Metadata only — the lean list carries no members. Rosters
+                        // are pulled per group below, once each.
+                        if let Err(e) = guard.upsert_group_meta(g, now) {
                             errors.push(format!("store group {}: {e}", g.id));
                         }
                     }
@@ -325,6 +327,60 @@ impl SyncEngine {
 
         self.pace().await;
         self.refresh_read_state().await;
+
+        // Member rosters, one group at a time. The lean list above carries no
+        // members; fill them in per group, each a small response that clears the
+        // size-based filter the full list trips. Bounded per cycle, and only
+        // groups whose roster is not stored yet are fetched — so after the first
+        // few cycles this loop finds nothing and the sync stays cheap.
+        let need = {
+            let store = self.store.clone();
+            match tokio::task::spawn_blocking(move || lock_store(&store).groups_needing_members(40))
+                .await
+            {
+                Ok(Ok(ids)) => ids,
+                Ok(Err(e)) => {
+                    report
+                        .errors
+                        .push(format!("listing groups needing members: {e}"));
+                    Vec::new()
+                }
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("listing groups needing members: {e}"));
+                    Vec::new()
+                }
+            }
+        };
+        if !need.is_empty() {
+            log::info!("fetching member rosters for {} group(s)", need.len());
+        }
+        for id in need {
+            match self.client.group_detail(&id).await {
+                Ok(value) => match serde_json::from_value::<crate::model::Group>(value) {
+                    Ok(g) => {
+                        let store = self.store.clone();
+                        let gid = id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            lock_store(&store).upsert_group(&g, now)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => report.errors.push(format!("store members {gid}: {e}")),
+                            Err(e) => report.errors.push(format!("store members {gid}: {e}")),
+                        }
+                    }
+                    Err(e) => log::debug!("decode members for group {id}: {e}"),
+                },
+                // Best-effort: a roster that fails (filter, network) stays NULL and
+                // is retried next cycle. It must not turn a good cycle into a bad
+                // one — the group's name and metadata are already stored.
+                Err(e) => log::debug!("group {id} roster deferred: {e}"),
+            }
+            self.pace().await;
+        }
 
         // Read the list back from the archive rather than from the two API
         // responses: it is already ordered most-recent-first, so the cycle

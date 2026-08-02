@@ -1,6 +1,6 @@
 [package]
 name = "groupme-desktop"
-version = "0.6.0"
+version = "0.7.0"
 description = "GroupMe for Windows — native desktop shell (Tauri 2) with a local SQLite archive for offline reading"
 authors = ["Shalom Karr"]
 # AGPL-3.0-only WITH the Commons Clause condition. Commons Clause has no SPDX

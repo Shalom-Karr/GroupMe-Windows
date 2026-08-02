@@ -2,6 +2,22 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.7.0] — 2026-08-02
+
+Groups sync on networks whose content filter caps response size.
+
+### Fixed
+
+- **Groups never loaded behind a size-limited content filter.** A filter that
+  buffers each response to scan it (observed with Techloq, ~1 MB ceiling) blocked
+  `GET /v3/groups` wholesale, because the full list — every group with its entire
+  member roster — runs to several megabytes. It was never content-specific; no
+  group was "blocked," the response was just too big to pass. The list is now
+  fetched lean (`omit=memberships`, ~140 KB per 100 groups), and each group's
+  members are pulled in a separate small `group_detail` call and cached — only
+  groups whose roster is not stored yet are fetched. After the first index, a
+  sync is just the lean list plus new messages.
+
 ## [0.6.0] — 2026-07-30
 
 Know who you are talking to, and paste a screenshot straight in.

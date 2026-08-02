@@ -350,13 +350,21 @@ impl GroupMeClient {
 
     /// Walks all pages via `per_page=100&page=N`. Stops when a page is shorter
     /// than the limit (including empty).
+    ///
+    /// `omit=memberships` drops the per-group member rosters — the bulk of the
+    /// payload. The full list runs to several MB, and a filter that caps the
+    /// response size it is willing to scan (observed with Techloq, ~1 MB) blocks
+    /// the whole thing rather than pass something it cannot inspect. The lean
+    /// list is ~140 KB per 100 groups and sails under that; each group's members
+    /// are then pulled one group at a time (`group_detail`), every such call a
+    /// small response of its own. See `sync::run_cycle`.
     pub async fn groups(&self) -> Result<Vec<Group>, ApiError> {
-        self.paginate("/groups").await
+        self.paginate("/groups", &[("omit", "memberships")]).await
     }
 
     /// Walks all pages via `per_page=100&page=N`.
     pub async fn chats(&self) -> Result<Vec<Chat>, ApiError> {
-        self.paginate("/chats").await
+        self.paginate("/chats", &[]).await
     }
 
     /// `GET /v3/groups/{id}?include=members` → the whole group object with its
@@ -381,7 +389,11 @@ impl GroupMeClient {
             .ok_or_else(|| ApiError::Decode(format!("null response for {path}")))
     }
 
-    async fn paginate<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, ApiError>
+    async fn paginate<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        extra: &[(&str, &str)],
+    ) -> Result<Vec<T>, ApiError>
     where
         Vec<T>: Default,
     {
@@ -389,7 +401,9 @@ impl GroupMeClient {
         let mut page = 1u32;
         loop {
             let page_str = page.to_string();
-            let url = self.query_url(path, &[("per_page", "100"), ("page", &page_str)])?;
+            let mut params: Vec<(&str, &str)> = vec![("per_page", "100"), ("page", &page_str)];
+            params.extend_from_slice(extra);
+            let url = self.query_url(path, &params)?;
             // Direct first, browser-proxy on interception — see `get_json`. This
             // is where every group used to vanish: the filter answered `/groups`
             // with its block page, which decoded to an empty list that looked

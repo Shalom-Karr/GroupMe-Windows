@@ -266,6 +266,80 @@ impl Store {
         Ok(())
     }
 
+    /// Upserts a group's METADATA only, from the lean `omit=memberships` list.
+    ///
+    /// It never writes `members_json` — NULL on insert, untouched on conflict —
+    /// so [`Self::groups_needing_members`] can find groups whose roster has not
+    /// been fetched, and so a lean list sync never wipes a roster a per-group
+    /// [`Self::upsert_group`] already stored. `raw_json` is likewise preserved on
+    /// conflict: the lean object has no members, and the full one from
+    /// `group_detail` is the copy worth keeping.
+    pub fn upsert_group_meta(&self, g: &Group, now: i64) -> Result<()> {
+        let preview = g.messages.as_ref();
+        self.conn.execute(
+            "INSERT INTO conversations (
+                id, kind, name, description, image_url, creator_user_id,
+                created_at, updated_at, messages_count,
+                last_message_id, last_message_text, last_message_created_at,
+                members_json, raw_json, synced_at,
+                unread_count, last_read_message_id, last_read_at
+             ) VALUES (?1,'group',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,?14,?15,?16)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                image_url = excluded.image_url,
+                updated_at = excluded.updated_at,
+                messages_count = excluded.messages_count,
+                last_message_id = excluded.last_message_id,
+                last_message_text = excluded.last_message_text,
+                last_message_created_at = excluded.last_message_created_at,
+                synced_at = excluded.synced_at,
+                -- members_json and raw_json are deliberately not touched here.
+                unread_count = COALESCE(excluded.unread_count, conversations.unread_count),
+                last_read_message_id =
+                    COALESCE(excluded.last_read_message_id, conversations.last_read_message_id),
+                last_read_at = COALESCE(excluded.last_read_at, conversations.last_read_at)",
+            params![
+                g.id,
+                g.name,
+                g.description,
+                g.image_url,
+                g.creator_user_id,
+                g.created_at,
+                g.updated_at,
+                g.messages_count.or_else(|| preview.and_then(|p| p.count)),
+                preview.and_then(|p| p.last_message_id.clone()),
+                preview
+                    .and_then(|p| p.preview.as_ref())
+                    .and_then(|v| v.get("text"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                preview.and_then(|p| p.last_message_created_at),
+                serde_json::to_string(g)?,
+                now,
+                g.unread_count,
+                g.last_read_message_id,
+                g.last_read_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Group ids whose member roster is not stored yet (the lean list leaves
+    /// `members_json` NULL). Each is filled by one `group_detail` call. Ordered
+    /// most-recently-active first so the groups likely to be opened fill in
+    /// soonest; `limit` bounds the per-cycle burst.
+    pub fn groups_needing_members(&self, limit: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM conversations
+             WHERE kind = 'group' AND members_json IS NULL
+             ORDER BY COALESCE(last_message_created_at, updated_at) DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn upsert_chat(&self, c: &Chat, now: i64) -> Result<()> {
         self.conn.execute(
             "INSERT INTO conversations (
