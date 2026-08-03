@@ -572,6 +572,11 @@ pub struct Conversation {
     /// Local mute flag. Purely a notification suppressor — it does not touch
     /// GroupMe's own server-side membership mute.
     pub muted: bool,
+    /// True when the account has left this group but the archive still holds its
+    /// history. Set by [`crate::store::Store::mark_former_groups`] after a
+    /// successful live-list fetch; reset to false whenever a group appears in the
+    /// live list or a successful detail fetch proves membership.
+    pub former: bool,
 }
 
 /// GroupMe IDs are decimal strings too large for f64 but comfortably inside

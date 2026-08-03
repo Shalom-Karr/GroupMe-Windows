@@ -29,7 +29,7 @@ fn now_unix() -> i64 {
 }
 
 /// Bump only alongside a matching arm in `migrate`.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// v2 adds server read state to `conversations`.
 ///
@@ -54,6 +54,16 @@ const SCHEMA_V3: &[&str] = &[
     "ALTER TABLE conversations ADD COLUMN pin_rank INTEGER",
     "ALTER TABLE conversations ADD COLUMN muted INTEGER NOT NULL DEFAULT 0",
 ];
+
+/// v4 adds a `former` flag to `conversations` that marks groups the account has
+/// left. The flag is written by [`Store::mark_former_groups`] after a successful
+/// live-list fetch, so the history stays archived while the sidebar can grey out
+/// the entry. Same in-place `ALTER TABLE` reasoning as `SCHEMA_V2` / `SCHEMA_V3`:
+/// `SCHEMA_V1` already declares the column so a fresh database arrives at the
+/// correct shape without running this, and "duplicate column name" on that path
+/// is ignored.
+const SCHEMA_V4: &[&str] =
+    &["ALTER TABLE conversations ADD COLUMN former INTEGER NOT NULL DEFAULT 0"];
 
 pub struct Store {
     conn: Connection,
@@ -167,6 +177,14 @@ impl Store {
                 let _ = tx.execute(stmt, []);
             }
         }
+        if current >= 1 {
+            // v1/v2/v3 -> v4: former flag for groups the account has left.
+            // Same in-place upgrade pattern: a fresh database already has this
+            // column from SCHEMA_V1, and "duplicate column name" is ignored.
+            for stmt in SCHEMA_V4 {
+                let _ = tx.execute(stmt, []);
+            }
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -222,6 +240,10 @@ impl Store {
                 members_json = excluded.members_json,
                 raw_json = excluded.raw_json,
                 synced_at = excluded.synced_at,
+                -- A successful group-detail fetch proves the account is still a
+                -- member; reset the former flag so a rejoin is reflected immediately
+                -- rather than waiting for the next live-list mark_former_groups call.
+                former = 0,
                 -- COALESCE, not a plain overwrite: `GET /v3/groups` omits read
                 -- state on most groups, so a list sync would otherwise erase the
                 -- values a single-group fetch had filled in.
@@ -294,6 +316,11 @@ impl Store {
                 last_message_text = excluded.last_message_text,
                 last_message_created_at = excluded.last_message_created_at,
                 synced_at = excluded.synced_at,
+                -- Rows from the lean list endpoint come only from the live member
+                -- list, so appearance here proves current membership. Reset former
+                -- so a rejoin is visible as soon as the list is refreshed — well
+                -- before mark_former_groups runs for the current cycle.
+                former = 0,
                 -- members_json and raw_json are deliberately not touched here.
                 unread_count = COALESCE(excluded.unread_count, conversations.unread_count),
                 last_read_message_id =
@@ -411,11 +438,12 @@ impl Store {
             "SELECT id, kind, name, image_url, updated_at, messages_count,
                     last_message_text, last_message_created_at,
                     unread_count, last_read_message_id,
-                    pin_rank, muted
+                    pin_rank, muted, former
              FROM conversations
-             -- Pinned first (NULL pin_rank sorts last), then by rank, then by the
-             -- existing recency ordering within each tier.
+             -- Pinned first (NULL pin_rank sorts last), then by rank; within each
+             -- tier former groups sink below current ones, then recency descending.
              ORDER BY (pin_rank IS NULL), pin_rank,
+                      former,
                       COALESCE(last_message_created_at, updated_at) DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -433,6 +461,7 @@ impl Store {
                 last_read_message_id: r.get(9)?,
                 pin_rank: r.get(10)?,
                 muted: r.get::<_, i64>(11)? != 0,
+                former: r.get::<_, i64>(12)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -570,6 +599,41 @@ impl Store {
             )
             .optional()?;
         Ok(muted.unwrap_or(0) != 0)
+    }
+
+    /// Marks groups absent from `present_ids` as former, and resets those present
+    /// to not-former. Must only be called when the live-list fetch succeeded — a
+    /// filtered or offline cycle must never mark everything former.
+    ///
+    /// Uses a two-step UPDATE (mark all, then unmark present ones) chunked into
+    /// batches of 500 to stay well under SQLite's 999-parameter limit, then wraps
+    /// both steps in one transaction so the archive is never half-updated.
+    pub fn mark_former_groups(&mut self, present_ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        // Mark every group as former first; re-active ones are cleared below.
+        tx.execute(
+            "UPDATE conversations SET former = 1 WHERE kind = 'group'",
+            [],
+        )?;
+
+        // Unmark groups that are still in the live list, in parameter-safe chunks.
+        for chunk in present_ids.chunks(500) {
+            let placeholders = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE conversations SET former = 0 \
+                 WHERE kind = 'group' AND id IN ({placeholders})"
+            );
+            tx.execute(&sql, rusqlite::params_from_iter(chunk.iter()))?;
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     /// The stored kind of a conversation, or `None` if we do not hold it. Lets a
@@ -1084,6 +1148,93 @@ impl Store {
             last_seen,
         })
     }
+
+    /// Past participants of a conversation: message senders who are no longer in
+    /// the current member roster.
+    ///
+    /// Name and avatar come from the sender's most recent message in this
+    /// conversation, so they reflect what they looked like last time they posted
+    /// rather than what the archive holds for them globally. System messages are
+    /// excluded; NULL user_ids are excluded. Current roster members are excluded
+    /// by parsing `members_json` from the stored conversation row.
+    ///
+    /// Intended for the "former members" panel of a conversation info sheet — it
+    /// answers "who used to post here?" without requiring a live API call.
+    pub fn past_members(&self, conversation_id: &str) -> Result<Vec<PastMember>> {
+        // Parse the current roster so we can exclude them from the results.
+        let current: std::collections::HashSet<String> = {
+            let raw: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT members_json FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            match raw {
+                Some(json) => serde_json::from_str::<Vec<Member>>(&json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|m| m.user_id)
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            }
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                m.user_id,
+                (SELECT mm.name FROM messages mm
+                 WHERE mm.user_id = m.user_id
+                   AND mm.conversation_id = ?1
+                   AND mm.name IS NOT NULL
+                 ORDER BY mm.id_sort DESC LIMIT 1) AS name,
+                (SELECT mm.avatar_url FROM messages mm
+                 WHERE mm.user_id = m.user_id
+                   AND mm.conversation_id = ?1
+                 ORDER BY mm.id_sort DESC LIMIT 1) AS avatar_url,
+                COUNT(*) AS message_count,
+                MAX(m.created_at) AS last_seen
+             FROM messages m
+             WHERE m.conversation_id = ?1
+               AND m.user_id IS NOT NULL
+               AND (m.sender_type IS NULL OR m.sender_type != 'system')
+               AND m.system = 0
+             GROUP BY m.user_id
+             ORDER BY message_count DESC",
+        )?;
+
+        let rows = stmt.query_map(params![conversation_id], |r| {
+            Ok(PastMember {
+                user_id: r.get(0)?,
+                name: r.get(1)?,
+                avatar_url: r.get(2)?,
+                message_count: r.get(3)?,
+                last_seen: r.get(4)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let pm = row?;
+            if !current.contains(&pm.user_id) {
+                out.push(pm);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A user who posted in a conversation but is no longer in its current member
+/// roster. See [`Store::past_members`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PastMember {
+    pub user_id: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub message_count: i64,
+    pub last_seen: Option<i64>,
 }
 
 /// A group referenced from a profile card: enough to render and open it.
@@ -1152,7 +1303,11 @@ CREATE TABLE IF NOT EXISTS conversations (
     -- Local-only (v3): pin ordering and mute. Declared here so a fresh database
     -- is correct without the SCHEMA_V3 ALTER; NULL pin_rank is unpinned.
     pin_rank                INTEGER,
-    muted                   INTEGER NOT NULL DEFAULT 0
+    muted                   INTEGER NOT NULL DEFAULT 0,
+    -- Local-only (v4): marks a group the account has left. Declared here so a
+    -- fresh database is correct without the SCHEMA_V4 ALTER. 0 = current member,
+    -- 1 = former member (history kept, group greyed out in sidebar).
+    former                  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -2398,5 +2553,229 @@ mod tests {
             att_id, att_id2,
             "attachment row was deleted and reinserted on an unchanged message"
         );
+    }
+
+    // ------------------------------------------------- former groups (v4) ---
+
+    /// Groups absent from the present-ids list become former; groups in the list
+    /// are (re-)marked as current. The entry remains visible in list_conversations.
+    #[test]
+    fn mark_former_groups_flags_absent_and_unflags_present() {
+        let mut s = Store::open_in_memory().unwrap();
+        // Two groups; we "leave" 10000002 by not including it in present_ids.
+        for (id, updated_at) in [("10000001", 100i64), ("10000002", 200)] {
+            s.upsert_group(
+                &Group {
+                    id: id.into(),
+                    name: Some(format!("Group {id}")),
+                    updated_at,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        }
+        assert!(!s.list_conversations().unwrap().iter().any(|c| c.former));
+
+        s.mark_former_groups(&["10000001".to_string()]).unwrap();
+
+        let by_id: std::collections::HashMap<_, _> = s
+            .list_conversations()
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+
+        assert!(!by_id["10000001"].former, "10000001 is still present");
+        assert!(by_id["10000002"].former, "10000002 was not in present list");
+
+        // Calling again with both ids must reset 10000002 to not-former.
+        s.mark_former_groups(&["10000001".to_string(), "10000002".to_string()])
+            .unwrap();
+        let by_id: std::collections::HashMap<_, _> = s
+            .list_conversations()
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+        assert!(
+            !by_id["10000002"].former,
+            "rejoin must clear the former flag"
+        );
+    }
+
+    /// A former group still appears in list_conversations but sorts below current ones.
+    #[test]
+    fn former_group_sorts_after_current_groups_of_the_same_recency_tier() {
+        let mut s = Store::open_in_memory().unwrap();
+        // Both groups have the same updated_at so recency ordering would be a tie;
+        // former must break the tie by sinking the left-group below the current one.
+        for id in ["10000001", "10000002"] {
+            s.upsert_group(
+                &Group {
+                    id: id.into(),
+                    name: Some(format!("Group {id}")),
+                    updated_at: 100,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        }
+        // Leave 10000001 by not including it in the present list.
+        s.mark_former_groups(&["10000002".to_string()]).unwrap();
+
+        let list = s.list_conversations().unwrap();
+        assert_eq!(list.len(), 2, "former group must still appear");
+        assert_eq!(list[0].id, "10000002", "current group must sort first");
+        assert!(list[1].former, "left group must be flagged former");
+
+        // DMs are never marked former so they must not be affected.
+        s.upsert_chat(
+            &Chat {
+                updated_at: 50,
+                other_user: crate::model::OtherUser {
+                    id: "20000003".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        let list = s.list_conversations().unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(!list[0].former);
+        assert!(!list[1].former || list[1].kind == ConversationKind::Dm);
+    }
+
+    // --------------------------------------------------- past members (F3) ---
+
+    /// A sender who has messages but is not in members_json appears as a past
+    /// member; a current roster member does NOT; system messages are ignored.
+    #[test]
+    fn past_members_returns_non_roster_senders_and_excludes_current_members() {
+        let mut s = Store::open_in_memory().unwrap();
+
+        // Group with one current member (20000002) and one past sender (20000003).
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                name: Some("Test Group".into()),
+                updated_at: 100,
+                members: vec![Member {
+                    user_id: Some("20000002".into()),
+                    nickname: Some("Current Member".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        // Insert three messages: two from the past sender, one from the current
+        // member, and one system message (should be excluded).
+        s.insert_messages(
+            "10000001",
+            &[
+                Message {
+                    id: "170000000000000001".into(),
+                    user_id: Some("20000003".into()),
+                    name: Some("Past Sender".into()),
+                    avatar_url: Some("https://img/past.png".into()),
+                    created_at: 1000,
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000002".into(),
+                    user_id: Some("20000003".into()),
+                    name: Some("Past Sender".into()),
+                    avatar_url: Some("https://img/past.png".into()),
+                    created_at: 2000,
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000003".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Current Member".into()),
+                    created_at: 3000,
+                    ..Default::default()
+                },
+                // System message — must be excluded from past_members.
+                Message {
+                    id: "170000000000000004".into(),
+                    user_id: Some("20000009".into()),
+                    sender_type: Some("system".into()),
+                    system: true,
+                    created_at: 4000,
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        let past = s.past_members("10000001").unwrap();
+        assert_eq!(past.len(), 1, "only the past sender must appear");
+        assert_eq!(past[0].user_id, "20000003");
+        assert_eq!(past[0].name.as_deref(), Some("Past Sender"));
+        assert_eq!(past[0].message_count, 2);
+        assert_eq!(past[0].last_seen, Some(2000));
+    }
+
+    // ------------------------------------- schema v4 in-place migration ------
+
+    /// A v3 archive (pin/mute columns present, former absent) must gain `former`
+    /// in place, keep its rows, and have all former flags default to 0.
+    #[test]
+    fn a_v3_archive_upgrades_to_v4_in_place_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+
+        // Build a v3-shaped archive: pin/mute columns present, former absent.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT,
+                    description TEXT, image_url TEXT, creator_user_id TEXT,
+                    created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0,
+                    messages_count INTEGER, last_message_id TEXT,
+                    last_message_text TEXT, last_message_created_at INTEGER,
+                    members_json TEXT, raw_json TEXT, synced_at INTEGER,
+                    unread_count INTEGER, last_read_message_id TEXT,
+                    last_read_at INTEGER,
+                    pin_rank INTEGER, muted INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO conversations (id, kind, name, updated_at)
+                 VALUES ('10000001','group','Kept',42);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+        let convos = s.list_conversations().unwrap();
+        assert_eq!(
+            convos.len(),
+            1,
+            "the existing row must survive the migration"
+        );
+        assert_eq!(convos[0].name.as_deref(), Some("Kept"));
+        // The new column arrives with its default: not former.
+        assert!(
+            !convos[0].former,
+            "former must default to false after migration"
+        );
+        // Existing state is preserved.
+        assert_eq!(convos[0].pin_rank, None);
+        assert!(!convos[0].muted);
+
+        // Re-open must be a no-op.
+        drop(s);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(again.list_conversations().unwrap().len(), 1);
     }
 }

@@ -2,6 +2,43 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.8.0] — 2026-08-03
+
+The client becomes a live messenger: typing indicators, on-demand sync, filters,
+and the archive starts remembering what GroupMe forgets — past groups and past
+members.
+
+### Added
+
+- **Typing indicators.** When someone is typing in the open conversation, a
+  quiet line above the composer says so — one name, two names, or "3 people are
+  typing…" — fed by the realtime socket events the app already received but
+  never showed.
+- **Sync now.** An empty conversation offers a "Sync now" button, and every
+  conversation's actions menu gains one — it jumps that conversation to the
+  front of the sync queue instead of waiting for the background cycle to reach
+  it.
+- **Past groups.** Groups you have left no longer vanish: they move to a
+  collapsed "Archives" section at the bottom of the sidebar, readable in full,
+  with the composer replaced by a note (you cannot send there anyway). The sync
+  marks a group as former only after a successful list fetch, so being offline
+  never mis-files anything.
+- **Past members.** A group's settings panel now lists people who wrote in the
+  group but are no longer in it — with their message count and when they were
+  last seen — reconstructed from the archive, which kept their messages all
+  along. Clicking one opens their profile card.
+- **Sidebar filters.** Toggle chips for Unread, Groups, and DMs. Unread means
+  server-confirmed unread, and combines with either kind filter.
+- **Sync status panel.** A small status button in the sidebar opens a summary:
+  groups/DMs archived, message counts, last sync time, and whether the last
+  cycle was healthy.
+
+### Fixed
+
+- **Composer layout.** The message bar's alignment and sizing quirks — button
+  drift when the textarea grows, overflow with long text or several image
+  drafts, stray gaps — were audited and fixed.
+
 ## [0.7.0] — 2026-08-02
 
 Groups sync on networks whose content filter caps response size.

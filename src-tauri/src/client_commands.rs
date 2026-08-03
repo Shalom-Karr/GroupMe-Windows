@@ -807,6 +807,23 @@ pub async fn client_leave_group(
         .map_err(|e| map_api("leaving the group", e))
 }
 
+/// Enqueues a priority sync of one conversation, waking the sync loop immediately
+/// rather than waiting for its next scheduled cycle.
+///
+/// The kind must be exactly `"group"` or `"dm"` — refused rather than defaulted,
+/// because a wrong kind produces a wrong API path (DM subscribed to `/group/…`
+/// once caused authentication failures that killed realtime for the session).
+#[tauri::command]
+pub async fn client_sync_now(
+    sync_now: State<'_, std::sync::Arc<crate::SyncNow>>,
+    conversation_id: String,
+    kind: String,
+) -> CmdResult<()> {
+    let kind = parse_kind(&kind)?;
+    sync_now.enqueue(conversation_id, kind);
+    Ok(())
+}
+
 /// Block (`blocked = true`) or unblock a user via the captured `/v3/blocks`
 /// endpoints (docs §7.5). `user` is the signed-in account; `otherUser` is the
 /// target.
@@ -883,10 +900,10 @@ mod tests {
             found += 1;
         }
         assert_eq!(
-            found, 17,
-            "expected exactly the seventeen client commands \
+            found, 18,
+            "expected exactly the eighteen client commands \
              (7 message mutations + 2 realtime bridges + 2 ui-preference \
-              + 3 local pin/mute + 3 group-settings/leave/block)"
+              + 3 local pin/mute + 3 group-settings/leave/block + 1 priority sync)"
         );
     }
 
@@ -1003,6 +1020,23 @@ mod tests {
         assert_eq!(route("dm", DM_KEY).unwrap(), "dm");
         assert!(route("Group", "99000001").is_err());
         assert!(route("channel", "99000001").is_err());
+    }
+
+    /// client_sync_now must reject any kind string that is not exactly "group" or
+    /// "dm". The function it delegates to is parse_kind, which wraps
+    /// ConversationKind::parse; this test confirms the mapping is wired correctly.
+    /// Defaulting to Group on an unknown kind is what produced wrong API paths and
+    /// broken realtime sessions in earlier versions (see CLAUDE.md).
+    #[test]
+    fn client_sync_now_kind_parsing_rejects_invalid_kinds() {
+        assert!(parse_kind("group").is_ok());
+        assert!(parse_kind("dm").is_ok());
+        assert!(parse_kind("").is_err(), "empty kind must be rejected");
+        assert!(parse_kind("Group").is_err(), "kind is case-sensitive");
+        assert!(
+            parse_kind("channel").is_err(),
+            "unknown kind must be rejected"
+        );
     }
 
     // ------------------------------------------------------- text guard rail

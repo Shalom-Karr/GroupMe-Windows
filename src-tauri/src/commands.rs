@@ -16,7 +16,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::model::{id_sort_key, Conversation, Message};
-use crate::store::{SearchHit, Store, UserProfile};
+use crate::store::{PastMember, SearchHit, Store, UserProfile};
 
 /// A **blocking** mutex on purpose. `Store` is synchronous rusqlite, so every
 /// access happens inside `spawn_blocking` (see `read_store`) and never on a
@@ -215,6 +215,19 @@ pub async fn archive_user_profile(
     .await
 }
 
+/// Message senders in a conversation who are no longer in its current member
+/// roster. Drives a "former members" info panel without a live API call.
+#[tauri::command]
+pub async fn archive_past_members(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+) -> CmdResult<Vec<PastMember>> {
+    read_store(store.inner(), "loading past members", move |s| {
+        s.past_members(&conversation_id)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +285,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 7, "expected exactly the seven archive readers");
+        assert_eq!(found, 8, "expected exactly the eight archive readers");
     }
 
     #[test]

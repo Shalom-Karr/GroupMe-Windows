@@ -732,7 +732,7 @@
   .draft-att.failed img { border-color: var(--accent); }
   .draft-att.failed .up { color: var(--accent); }
 
-  .composer-box { display: flex; align-items: flex-end; gap: .3rem; padding: .28rem .3rem; }
+  .composer-box { display: flex; align-items: flex-end; gap: .3rem; padding: .28rem .3rem; cursor: text; }
   /* A hairline between the attach control and the text, the same device the
      rest of the page uses to separate a margin from a column. It grows with
      the field, so a tall draft reads as one block rather than three controls. */
@@ -741,17 +741,20 @@
     font-size: .95rem; line-height: 1.6; color: var(--fg);
     border: 0; border-left: 1px solid var(--rule); background: none; resize: none;
     margin: 0; padding: .4rem .4rem .4rem .7rem;
-    max-height: 176px; overflow-y: auto;
+    max-height: 176px; overflow-y: hidden;
+    overflow-wrap: break-word; word-break: break-word;
     -webkit-user-select: text; user-select: text;
+    cursor: text; align-self: flex-end;
   }
   .composer-box textarea::placeholder { color: var(--fg-soft); }
   .composer-box textarea:focus { outline: none; }
   .composer-field:focus-within .composer-box textarea { border-left-color: var(--accent-soft); }
 
   .cbtn {
-    flex: none; width: 30px; height: 30px; border-radius: 2px; margin-bottom: 2px;
+    flex: none; width: 30px; height: 30px; border-radius: 2px;
     border: 1px solid transparent; background: none; color: var(--fg-soft);
     display: grid; place-items: center; cursor: pointer; padding: 0;
+    align-self: flex-end; margin-bottom: 3px;
   }
   .cbtn:hover:not(:disabled) { color: var(--fg); background: var(--raised); border-color: var(--rule); }
   .cbtn:disabled { opacity: .38; cursor: not-allowed; }
@@ -778,6 +781,123 @@
   .composer-foot .count { font-size: .58rem; flex: none; }
   .composer-foot .count.over { color: var(--warn); }
   .cerr { color: var(--accent); }
+
+  /* ---------- typing bar (above composer) ---------- */
+  .typing-bar {
+    flex: none; height: 1.55rem;
+    display: flex; align-items: center;
+    padding: 0 1.1rem;
+    font-size: .75rem; color: var(--fg-soft);
+    font-family: var(--font-label); letter-spacing: .06em;
+    border-top: 1px solid var(--rule); background: var(--surface);
+  }
+  .typing-bar.active { color: var(--fg-soft); }
+  @keyframes typing-dots {
+    0%, 80%, 100% { opacity: .25; }
+    40% { opacity: 1; }
+  }
+  .typing-bar .t-dot {
+    display: inline-block; width: 3px; height: 3px; margin: 0 1px;
+    border-radius: 50%; background: currentColor; vertical-align: middle;
+    animation: typing-dots 1.4s ease-in-out infinite;
+  }
+  .typing-bar .t-dot:nth-child(2) { animation-delay: .2s; }
+  .typing-bar .t-dot:nth-child(3) { animation-delay: .4s; }
+
+  /* ---------- composer read-only overlay (former groups) ---------- */
+  .composer-ro {
+    display: none; padding: .55rem .7rem;
+    font-size: .8rem; color: var(--fg-soft); font-style: italic;
+    border-top: 1px solid var(--rule); background: var(--raised);
+    text-align: center;
+  }
+  .composer.readonly .composer-box { opacity: .32; pointer-events: none; }
+  .composer.readonly .drafts { display: none !important; }
+  .composer.readonly .composer-ro { display: block; }
+
+  /* ---------- sidebar filter chips ---------- */
+  .filter-strip {
+    display: flex; gap: .35rem; padding: .4rem .8rem .5rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .filter-chip {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase; padding: .2rem .55rem;
+    border: 1px solid var(--rule); border-radius: 1px;
+    background: none; color: var(--fg-soft); cursor: pointer; white-space: nowrap;
+  }
+  .filter-chip:hover { color: var(--fg); border-color: var(--fg-soft); background: var(--surface); }
+  .filter-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); }
+
+  /* ---------- archives section (former groups) ---------- */
+  .archive-toggle {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .55rem .8rem .35rem; cursor: pointer;
+    border: 0; border-top: 1px solid var(--rule);
+    background: none; color: var(--fg-soft); font: inherit; text-align: left;
+    width: 100%;
+  }
+  .archive-toggle:hover { color: var(--fg); background: var(--surface); }
+  .archive-toggle .arc-label {
+    font-family: var(--font-label); font-size: .6rem; letter-spacing: .1em; text-transform: uppercase;
+    flex: 1;
+  }
+  .archive-toggle .arc-count {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .09em;
+    color: var(--accent); min-width: 1.2rem;
+  }
+  .archive-toggle svg { width: 12px; height: 12px; transition: transform .15s; flex: none; }
+  .archive-toggle.open svg { transform: rotate(90deg); }
+  .conv.former .row { opacity: .7; }
+  .conv.former .row-name { color: var(--fg-soft); }
+  .conv.former .row-flag.ex-tag {
+    font-family: var(--font-label); font-size: .52rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--fg-soft); border: 1px solid var(--rule);
+    border-radius: 1px; padding: 0 .25rem; margin-left: .2rem;
+  }
+
+  /* ---------- stats popover ---------- */
+  .stats-pop {
+    min-width: 14rem; padding: .65rem .8rem;
+    display: none; /* overridden by .show */
+  }
+  .stats-pop.show { display: block; }
+  .stats-row {
+    font-size: .8rem; color: var(--fg); margin: .18rem 0; line-height: 1.5;
+  }
+  .stats-row .lbl {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft); display: block; margin-bottom: .1rem;
+  }
+  .stats-healthy { color: var(--ok); }
+  .stats-warn { color: var(--warn); }
+  .stats-sep { border: 0; border-top: 1px solid var(--rule); margin: .45rem 0; }
+
+  /* ---------- hbtn variant for sidebar header ---------- */
+  .sbtn {
+    flex: none; width: 22px; height: 22px; padding: 0; border: 0;
+    background: none; color: var(--fg-soft); cursor: pointer;
+    display: grid; place-items: center; border-radius: 1px;
+    font-size: .95rem; line-height: 1;
+  }
+  .sbtn:hover { color: var(--fg); background: var(--raised); }
+
+  /* ---------- empty-thread sync state ---------- */
+  .sync-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: .75rem; padding: 2.5rem 1rem; text-align: center;
+  }
+  .sync-empty .se-msg {
+    font-size: .9rem; color: var(--fg-soft);
+  }
+  .sync-empty .se-btn {
+    font-family: var(--font-label); font-size: .62rem; letter-spacing: .1em;
+    text-transform: uppercase; padding: .38rem .85rem;
+    border: 1px solid var(--accent); background: none; color: var(--accent);
+    border-radius: 1px; cursor: pointer;
+  }
+  .sync-empty .se-btn:hover { background: var(--accent-soft); }
+  .sync-empty .se-btn:disabled { opacity: .5; cursor: not-allowed; }
 
   /* ---------- popovers ---------- */
 
@@ -918,6 +1038,7 @@
     .scroller { padding: 0 .95rem; }
     .messages { padding: .5rem 0 1.2rem; }
     .composer { padding: .65rem .95rem .8rem; }
+    .typing-bar { padding: 0 .95rem; }
     .empty { padding: 1.75rem 1.15rem; }
     .empty h1 { font-size: 1.5rem; }
   }
@@ -1211,6 +1332,8 @@
   <svg id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>
   <svg id="i-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
   <svg id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
+  <svg id="i-sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.4-2.6L3 16"/><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.4 2.6L21 8"/><path d="M3 21v-5h5"/><path d="M21 3v5h-5"/></svg>
+  <svg id="i-chevron-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
 </div>
 
 <div class="app" id="app">
@@ -1220,6 +1343,7 @@
         <div class="mark" id="brandMark" aria-hidden="true"></div>
         <div class="brand-name">GroupMe</div>
         <div class="pill" id="conn" title="Connection state"><span class="dot"></span><span id="connText">Starting</span></div>
+        <button class="sbtn" id="toStats" type="button" title="Archive stats" aria-label="Archive stats">⟳</button>
         <button class="uiswap" id="uiswap" type="button"
                 title="Switch to the GroupMe web UI (remembered as your preference)">Web UI</button>
       </div>
@@ -1227,6 +1351,11 @@
         <input type="search" id="q" placeholder="Search all messages"
                aria-label="Search every archived message" autocomplete="off" spellcheck="false" />
         <span class="search-hint">/</span>
+      </div>
+      <div class="filter-strip" id="filterStrip">
+        <button class="filter-chip" id="filterUnread" type="button" aria-pressed="false">Unread</button>
+        <button class="filter-chip" id="filterGroups" type="button" aria-pressed="false">Groups</button>
+        <button class="filter-chip" id="filterDMs" type="button" aria-pressed="false">DMs</button>
       </div>
     </div>
     <div class="list" id="list" role="list"></div>
@@ -1293,12 +1422,18 @@
         <div class="messages" id="messages"></div>
       </div>
 
-      <div class="composer">
+      <!-- Fixed-height typing indicator. Reserves space so the composer never
+           jumps when someone starts or stops typing. -->
+      <div id="typingBar" class="typing-bar" aria-live="polite" aria-atomic="true"></div>
+
+      <div class="composer" id="composer">
         <div class="composer-inner">
           <!-- One field. The reply/edit strip and the attachment tray are
                sections inside its frame, above the typing line, so they read as
                attached to the box and grow upward instead of nudging it. -->
           <div class="composer-field">
+            <!-- Read-only note shown for former groups. -->
+            <div class="composer-ro" id="composerRo">You're no longer in this group — archive is read-only.</div>
             <div class="ctx" id="ctx">
               <div class="ctx-body">
                 <div class="ctx-title" id="ctxTitle"></div>
@@ -1331,6 +1466,7 @@
 <div class="pop pop-emoji" id="emojiPop" role="menu" aria-label="React with"></div>
 <div class="pop menu" id="menuPop" role="menu" aria-label="Message actions"></div>
 <div class="pop datepop" id="datePop" role="dialog" aria-label="Jump to a date"></div>
+<div class="pop stats-pop" id="statsPop" role="dialog" aria-label="Archive stats"></div>
 <div class="sheet" id="convSheet" role="dialog" aria-modal="true" aria-label="Conversation settings"></div>
 <div class="sheet" id="profileCard" role="dialog" aria-modal="true" aria-label="User profile"></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -1837,8 +1973,10 @@
     }
     if (cmd === "archive_media_path") return null;
     if (cmd === "archive_stats") {
-      return { conversations: 2, messages: 1516, last_sync_at: T0 - 120, account_name: "Sample Account" };
+      return { conversations: 2, messages: 1516, group_messages: 1420, dm_messages: 96,
+               last_sync_at: T0 - 120, account_name: "Sample Account" };
     }
+    if (cmd === "archive_past_members") return [];
     return null;
   }
 
@@ -1936,7 +2074,25 @@
      block set are on-demand caches, never persisted. */
 
   var groupDetailCache = Object.create(null); // cid -> group object incl. members
+  var pastMembersCache = Object.create(null); // cid -> array of past members, or null
   var blockedUsers = Object.create(null);     // user id string -> true (optimistic)
+
+  // Sidebar filter state, persisted in localStorage.
+  var sideFilter = { unread: false, kind: null }; // kind: null | "group" | "dm"
+  try {
+    var _sf = window.localStorage.getItem("groupme.sideFilter.v1");
+    if (_sf) { var _sfp = JSON.parse(_sf); sideFilter.unread = !!_sfp.unread; sideFilter.kind = _sfp.kind || null; }
+  } catch (e) { /* ignore */ }
+
+  // Archives section (former groups) collapsed state.
+  var archivesCollapsed = true;
+  try { archivesCollapsed = window.localStorage.getItem("groupme.archivesCollapsed.v1") !== "false"; } catch (e) { /* ignore */ }
+
+  // Track last archive://synced payload for the stats panel.
+  var lastSyncedPayload = null;
+
+  // When non-null, holds the cid whose thread was empty and Sync Now was clicked.
+  var awaitingSyncForCid = null;
 
   function pinRankOf(c) {
     var r = fld(c, "pin_rank", "pinRank");
@@ -1986,18 +2142,49 @@
     return first.length > 18 ? first.slice(0, 18) + "…" : first;
   }
 
+  function saveSideFilter() {
+    try { window.localStorage.setItem("groupme.sideFilter.v1", JSON.stringify(sideFilter)); } catch (e) { /* ignore */ }
+  }
+
+  function matchesSideFilter(c) {
+    if (sideFilter.unread) {
+      var n = unreadCountOf(c);
+      // Only treat as unread when server explicitly says > 0. null/undefined = not unread.
+      if (!(n != null && n > 0)) return false;
+    }
+    if (sideFilter.kind && c.kind !== sideFilter.kind) return false;
+    return true;
+  }
+
+  function isFormer(c) { return !!(c && fld(c, "former") === true); }
+
   function renderConversations() {
     listEl.textContent = "";
-    if (!state.convos.length) {
+
+    // Former groups are always separated into the Archives section.
+    var active = state.convos.filter(function (c) { return !isFormer(c); });
+    var former = state.convos.filter(isFormer);
+
+    // With any filter active, hide Archives entirely.
+    var filterOn = sideFilter.unread || sideFilter.kind != null;
+
+    if (!active.length && !former.length) {
       listEl.appendChild(el("div", "side-empty",
         "No conversations have been archived yet. The first sync is still running."));
       return;
     }
-    // Pinned first, in the user's pin order; the rest keep the recency order the
-    // archive already delivers. Two sections, so reorder has somewhere to move.
-    var pinned = pinnedSorted();
-    var rest = state.convos.filter(function (c) { return !isPinned(c); });
-    var unread = state.convos.filter(isUnread).length;
+
+    // Apply sidebar filter.
+    var filtered = filterOn ? active.filter(matchesSideFilter) : active;
+
+    var pinned = filterOn
+      ? filtered.filter(isPinned).sort(function (a, b) {
+          var ra = pinRankOf(a), rb = pinRankOf(b);
+          return ra !== rb ? (ra < rb ? -1 : 1) : 0;
+        })
+      : pinnedSorted().filter(function (c) { return !isFormer(c); });
+    var rest = filtered.filter(function (c) { return !isPinned(c); });
+    var unread = active.filter(isUnread).length;
 
     if (pinned.length) {
       var plabel = el("div", "list-label", "Pinned");
@@ -2009,11 +2196,36 @@
     }
 
     var label = el("div", "list-label", pinned.length ? "All conversations" : "Conversations");
-    if (unread) label.appendChild(el("span", "sub", unread + " unread"));
+    if (!filterOn && unread) label.appendChild(el("span", "sub", unread + " unread"));
     listEl.appendChild(label);
-    var frag = document.createDocumentFragment();
-    rest.forEach(function (c) { frag.appendChild(convoRow(c)); });
-    listEl.appendChild(frag);
+
+    if (!rest.length && !pinned.length) {
+      listEl.appendChild(el("div", "side-empty", "No conversations match this filter."));
+    } else {
+      var frag = document.createDocumentFragment();
+      rest.forEach(function (c) { frag.appendChild(convoRow(c)); });
+      listEl.appendChild(frag);
+    }
+
+    // Archives section — hidden when any filter is active.
+    if (former.length && !filterOn) {
+      var togBtn = el("button", "archive-toggle" + (archivesCollapsed ? "" : " open"), "");
+      togBtn.type = "button";
+      togBtn.appendChild(el("span", "arc-label", "Archives"));
+      togBtn.appendChild(el("span", "arc-count", String(former.length)));
+      togBtn.appendChild(icon("chevron-r"));
+      togBtn.addEventListener("click", function () {
+        archivesCollapsed = !archivesCollapsed;
+        try { window.localStorage.setItem("groupme.archivesCollapsed.v1", String(!archivesCollapsed)); } catch (e) { /* ignore */ }
+        renderConversations();
+      });
+      listEl.appendChild(togBtn);
+      if (!archivesCollapsed) {
+        var afrag = document.createDocumentFragment();
+        former.forEach(function (c) { afrag.appendChild(convoRow(c)); });
+        listEl.appendChild(afrag);
+      }
+    }
   }
 
   // The row stays a single button, wrapped in a `.conv` that also owns the
@@ -2024,8 +2236,9 @@
     var name = convoTitle(c);
     var un = unreadInfo(c);
     var pinned = isPinned(c), muted = isMuted(c);
+    var former = isFormer(c);
 
-    var wrap = el("div", "conv" + (pinned ? " pinned" : ""));
+    var wrap = el("div", "conv" + (pinned ? " pinned" : "") + (former ? " former" : ""));
     wrap.dataset.cid = c.id;
 
     var row = el("button", "row");
@@ -2050,6 +2263,9 @@
       var mf = withIcon(el("span", "row-flag mute"), "bell-off");
       mf.setAttribute("aria-label", "Muted");
       top.appendChild(mf);
+    }
+    if (former) {
+      top.appendChild(el("span", "row-flag ex-tag", "left"));
     }
     top.appendChild(el("div", "row-time", relTime(convoStamp(c))));
     if (un.unread) {
@@ -3310,7 +3526,12 @@
     state.atBottom = true;
     cancelReply();
     cancelEdit();
+    // Always clear the textarea and reset height on conversation switch so a
+    // tall draft from the previous conversation doesn't carry over visually.
+    if (!state.editing) { input.value = ""; autoGrow(); }
     clearDrafts();
+    _lastTypingBarText = null; // force re-paint of typing bar
+    paintTypingBar();
     var mySeq = ++state.seq;
 
     app.classList.add("thread-open");
@@ -3361,8 +3582,15 @@
     if (!page.length) {
       state.hasMore = false;
       setTop("");
-      msgsEl.appendChild(el("div", "side-empty",
-        "Nothing from this conversation has been archived yet. It will fill in as the sync reaches it."));
+      var seBox = el("div", "sync-empty");
+      seBox.appendChild(el("div", "se-msg", "Nothing archived here yet."));
+      var seBtn = el("button", "se-btn", "Sync now");
+      seBtn.type = "button";
+      (function (snCid, snKind, snBtn) {
+        snBtn.addEventListener("click", function () { doSyncNow(snCid, snKind, snBtn); });
+      })(cid, kind, seBtn);
+      seBox.appendChild(seBtn);
+      msgsEl.appendChild(seBox);
       updateSub();
       markRead(cid);
       return;
@@ -3507,8 +3735,11 @@
   }
 
   var typingTimer = setInterval(function () {
-    if (state.active && state.typing.has(state.active)) updateSub();
-  }, 2000);
+    if (state.active && state.typing.has(state.active)) {
+      updateSub();
+      paintTypingBar();
+    }
+  }, 1000);
 
   /* ============================= composer =============================== */
 
@@ -3516,7 +3747,62 @@
   var cnote = $("cnote"), ccount = $("ccount"), fileEl = $("file");
   var ctxEl = $("ctx"), ctxTitle = $("ctxTitle"), ctxText = $("ctxText");
   var draftsEl = $("drafts");
+  var typingBarEl = $("typingBar");
+  var composerEl = $("composer");
   var localSeq = 0;
+
+  // Paints the fixed-height typing bar above the composer.
+  // Resolves names from: group roster cache > loaded thread messages > "Someone".
+  function typingNamesFor(cid) {
+    var m = state.typing.get(cid);
+    if (!m || !m.size) return [];
+    var now = Date.now();
+    var names = [];
+    m.forEach(function (v, k) {
+      if (v.until <= now) { m.delete(k); return; }
+      if (state.selfId && k === state.selfId) return;
+      var name = v.name;
+      if (!name) {
+        // Try group roster cache.
+        var g = groupDetailCache[String(cid)];
+        if (g && Array.isArray(g.members)) {
+          for (var i = 0; i < g.members.length; i++) {
+            if (String(fld(g.members[i], "user_id", "userId")) === k) {
+              name = fld(g.members[i], "nickname", "name"); break;
+            }
+          }
+        }
+      }
+      if (!name) {
+        // Try loaded thread messages.
+        state.msgById.forEach(function (msg) {
+          if (!name && msg.user_id != null && String(msg.user_id) === k && msg.name) name = msg.name;
+        });
+      }
+      names.push(name || "Someone");
+    });
+    return names;
+  }
+
+  var _lastTypingBarText = null;
+  function paintTypingBar() {
+    if (!typingBarEl) return;
+    var cid = state.active;
+    if (!cid) { if (_lastTypingBarText !== "") { typingBarEl.textContent = ""; _lastTypingBarText = ""; } return; }
+    var names = typingNamesFor(cid);
+    var text;
+    if (!names.length) text = "";
+    else if (names.length === 1) text = names[0] + " is typing";
+    else if (names.length === 2) text = names[0] + " and " + names[1] + " are typing";
+    else text = names.length + " people are typing";
+    if (text === _lastTypingBarText) return;
+    _lastTypingBarText = text;
+    typingBarEl.textContent = "";
+    if (!text) return;
+    typingBarEl.appendChild(document.createTextNode(text + " "));
+    var d1 = el("span", "t-dot"); var d2 = el("span", "t-dot"); var d3 = el("span", "t-dot");
+    typingBarEl.appendChild(d1); typingBarEl.appendChild(d2); typingBarEl.appendChild(d3);
+  }
 
   // Whether the field has the caret, which is the only thing the keyboard hint
   // in the footer is conditioned on — a permanent hint is furniture.
@@ -3529,6 +3815,18 @@
     cnote.className = msg ? "grow cerr" : "grow";
     cnote.title = msg || "";
     if (!msg) syncComposer();
+  }
+
+  // Trigger an immediate sync for a conversation. Used by the empty-state button
+  // and the overflow menu "Sync now" item.
+  function doSyncNow(cid, kind, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
+    awaitingSyncForCid = cid;
+    write("client_sync_now", { conversationId: cid, kind: kind || "group" }).catch(function (e) {
+      awaitingSyncForCid = null;
+      if (btn) { btn.disabled = false; btn.textContent = "Sync now"; }
+      setError((e && e.message) ? e.message : "Sync failed.");
+    });
   }
 
   // Mirrors `.composer-box textarea { max-height }`. The field grows with the
@@ -3550,6 +3848,23 @@
   function charCount(s) { return Array.from(String(s)).length; }
 
   function syncComposer() {
+    var c = state.active ? state.byId[state.active] : null;
+    var former = !!(c && fld(c, "former") === true);
+
+    // Former groups get a read-only composer — no typing, no sending.
+    if (composerEl) composerEl.classList.toggle("readonly", former);
+    if (former) {
+      input.disabled = true;
+      sendBtn.disabled = true;
+      attachBtn.disabled = true;
+      cnote.className = "grow";
+      cnote.textContent = "";
+      cnote.title = "";
+      ccount.textContent = "";
+      return;
+    }
+    input.disabled = false;
+
     var n = charCount(input.value);
     var over = n > MAX_TEXT;
     ccount.textContent = (n > MAX_TEXT - 150) ? (n + " / " + MAX_TEXT) : "";
@@ -3873,11 +4188,13 @@
 
   var scrim = $("scrim"), emojiPop = $("emojiPop"), menuPop = $("menuPop");
   var datePop = $("datePop"), convSheet = $("convSheet"), profileCard = $("profileCard");
+  var statsPop = $("statsPop");
 
   function closePops() {
     emojiPop.classList.remove("show");
     menuPop.classList.remove("show");
     datePop.classList.remove("show");
+    statsPop.classList.remove("show");
     convSheet.classList.remove("show");
     profileCard.classList.remove("show");
     scrim.classList.remove("show");
@@ -4297,6 +4614,7 @@
       if (idx >= 0 && idx < pins.length - 1) menuPop.appendChild(menuItem("Move down", "caret", function () { movePin(c, 1); }));
     }
     menuPop.appendChild(menuItem(muted ? "Unmute" : "Mute", muted ? "bell" : "bell-off", function () { toggleMute(c); }));
+    menuPop.appendChild(menuItem("Sync now", "sync", function () { doSyncNow(String(c.id), c.kind || "group", null); }));
     menuPop.appendChild(menuItem("Settings…", "cog", function () { openConvSettings(String(c.id)); }));
 
     menuPop.appendChild(document.createElement("hr"));
@@ -4356,6 +4674,7 @@
     convSheet.classList.add("show");
     scrim.classList.add("show");
     if (c.kind === "group" && !groupDetailCache[sheetCid]) loadGroupDetail(sheetCid);
+    if (c.kind === "group" && !(String(sheetCid) in pastMembersCache)) loadPastMembers(sheetCid);
   }
 
   function loadGroupDetail(cid) {
@@ -4363,6 +4682,14 @@
       // `call` swallows a failure to null; store a sentinel so the panel shows
       // the graceful "directory blocked" note rather than a permanent spinner.
       groupDetailCache[String(cid)] = g || { __failed: true };
+      if (sheetCid === String(cid) && convSheet.classList.contains("show")) renderSheet();
+    });
+  }
+
+  function loadPastMembers(cid) {
+    pastMembersCache[String(cid)] = null; // sentinel: loading
+    call("archive_past_members", { conversationId: String(cid) }).then(function (arr) {
+      pastMembersCache[String(cid)] = Array.isArray(arr) ? arr : [];
       if (sheetCid === String(cid) && convSheet.classList.contains("show")) renderSheet();
     });
   }
@@ -4429,8 +4756,12 @@
 
     if (sheetConfirmMode) body.appendChild(buildSheetConfirm(c));
 
-    if (isGroup) body.appendChild(buildMembers(c));
-    else body.appendChild(dmNote(c));
+    if (isGroup) {
+      body.appendChild(buildMembers(c));
+      body.appendChild(buildPastMembers(c));
+    } else {
+      body.appendChild(dmNote(c));
+    }
 
     convSheet.appendChild(body);
   }
@@ -4570,6 +4901,43 @@
     var list = el("div", "members");
     list.id = "membersList";
     fillMembers(list, members, sheetFilter.trim().toLowerCase());
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  function buildPastMembers(c) {
+    var wrap = document.createDocumentFragment();
+    var cid = String(c.id);
+    var arr = pastMembersCache[cid];
+    // null = still loading; undefined = not yet requested (shouldn't happen)
+    if (arr === null) {
+      // Loading — don't show anything yet; will re-render when it arrives.
+      return wrap;
+    }
+    if (!Array.isArray(arr) || !arr.length) return wrap;
+
+    var sec = el("div", "sheet-sec", "Past members");
+    sec.appendChild(el("span", "cnt", String(arr.length)));
+    wrap.appendChild(sec);
+
+    var list = el("div", "members");
+    arr.forEach(function (pm) {
+      var uid = fld(pm, "user_id", "userId");
+      var name = fld(pm, "name") || "Former member";
+      var avatarUrl = fld(pm, "avatar_url", "avatarUrl");
+      var msgCount = Number(fld(pm, "message_count", "messageCount") || 0);
+      var lastSeen = fld(pm, "last_seen", "lastSeen");
+
+      var row = el("div", "member");
+      row.appendChild(makeAvatar(name, avatarUrl, uid || name, "sm", uid));
+      var tx = el("div", "member-text");
+      tx.appendChild(el("div", "member-name", name));
+      var detail = msgCount.toLocaleString() + (msgCount === 1 ? " message" : " messages");
+      if (lastSeen) detail += " · last seen " + relTime(lastSeen);
+      tx.appendChild(el("div", "member-sub", detail));
+      row.appendChild(tx);
+      list.appendChild(row);
+    });
     wrap.appendChild(list);
     return wrap;
   }
@@ -4823,6 +5191,11 @@
   function onRealtimeMessage(evt) {
     var a = adaptMessage(evt);
     if (!a) return;
+    // Clear the sender's typing entry immediately — they sent, they're done typing.
+    var tm = state.typing.get(a.cid);
+    var senderUid = a.msg.user_id != null ? String(a.msg.user_id) : null;
+    if (tm && senderUid) { tm.delete(senderUid); }
+    if (a.cid === state.active) paintTypingBar();
     var stamp = Number(fld(a.msg, "created_at", "createdAt")) || nowSecs();
     var preview = a.msg.text || (Array.isArray(a.msg.attachments) && a.msg.attachments.length ? "sent an attachment" : "");
 
@@ -4859,7 +5232,7 @@
     var m = state.typing.get(a.cid);
     if (!m) { m = new Map(); state.typing.set(a.cid, m); }
     m.set(a.uid, { name: a.name, until: a.until });
-    if (a.cid === state.active) updateSub();
+    if (a.cid === state.active) { updateSub(); paintTypingBar(); }
   }
 
   // Recorded, then resolved. It is never painted on its own.
@@ -4875,6 +5248,63 @@
     if (s == null) return;
     state.net = s;
     paintConn();
+  }
+
+  /* ========================== stats panel ================================
+     A small popover from the sidebar header showing archive size, sync time,
+     and last-cycle health. Refreshed on every open.                        */
+
+  function statsRow(labelText, valueText, mod) {
+    var row = el("div", "stats-row" + (mod ? " " + mod : ""));
+    row.appendChild(el("span", "lbl", labelText));
+    row.appendChild(document.createTextNode(valueText));
+    return row;
+  }
+
+  async function openStatsPop(anchor) {
+    statsPop.textContent = "";
+    placePop(statsPop, anchor);
+
+    var s = await call("archive_stats");
+    if (!statsPop.classList.contains("show")) return; // closed while loading
+    statsPop.textContent = "";
+
+    if (!s) {
+      statsPop.appendChild(el("div", "stats-row", "No stats available."));
+      return;
+    }
+
+    // Derive group/DM counts from the conversation list (always current).
+    var grpCount = state.convos.filter(function (c) { return c.kind === "group" && !isFormer(c); }).length;
+    var dmCount  = state.convos.filter(function (c) { return c.kind === "dm"; }).length;
+    statsPop.appendChild(statsRow("Conversations", grpCount.toLocaleString() + " groups · " + dmCount.toLocaleString() + " DMs"));
+
+    var grpMsgs = fld(s, "group_messages", "groupMessages");
+    var dmMsgs  = fld(s, "dm_messages", "dmMessages");
+    var totalMsgs = Number(fld(s, "messages") || 0);
+    if (grpMsgs != null && dmMsgs != null) {
+      statsPop.appendChild(statsRow("Messages", Number(grpMsgs).toLocaleString() + " group · " + Number(dmMsgs).toLocaleString() + " DM"));
+    } else {
+      statsPop.appendChild(statsRow("Messages", totalMsgs.toLocaleString() + " total"));
+    }
+
+    var synced = fld(s, "last_sync_at", "lastSyncAt");
+    var syncLabel = synced ? relTime(synced) : "Never";
+    statsPop.appendChild(statsRow("Last sync", syncLabel));
+
+    var acct = fld(s, "account_name", "accountName");
+    if (acct) statsPop.appendChild(statsRow("Account", String(acct)));
+
+    statsPop.appendChild(el("hr", "stats-sep"));
+
+    // Last cycle health from the stashed synced payload.
+    var errors = lastSyncedPayload && Array.isArray(lastSyncedPayload.errors)
+      ? lastSyncedPayload.errors.length : 0;
+    if (errors > 0) {
+      statsPop.appendChild(statsRow("Last cycle", errors + (errors === 1 ? " error" : " errors"), "stats-warn"));
+    } else {
+      statsPop.appendChild(statsRow("Last cycle", "Healthy", "stats-healthy"));
+    }
   }
 
   async function subscribe() {
@@ -4901,13 +5331,25 @@
   }
 
   var syncedTimer = null;
-  function onSynced() {
+  function onSynced(evt) {
+    // Stash the raw payload so the stats panel can show error counts.
+    var raw = unwrap(evt);
+    if (raw && typeof raw === "object") lastSyncedPayload = raw;
     // A burst of sync events must not turn into a burst of full list rebuilds.
     clearTimeout(syncedTimer);
     syncedTimer = setTimeout(async function () {
       await loadStats();
       var n = await loadConversations();
       if (n && !state.active) showIdleEmpty();
+      // If Sync Now was clicked on an empty thread and the sync just completed,
+      // reload that conversation to pick up newly archived messages.
+      if (awaitingSyncForCid && awaitingSyncForCid === state.active) {
+        var cidToReload = awaitingSyncForCid;
+        awaitingSyncForCid = null;
+        openConversation(cidToReload);
+      } else {
+        awaitingSyncForCid = null;
+      }
     }, 400);
   }
 
@@ -4960,6 +5402,56 @@
   attachBtn.appendChild(icon("image"));
   sendBtn.appendChild(icon("send"));
   searchWrap.insertBefore(icon("search"), searchWrap.firstChild);
+
+  // Stats button → opens the archive stats popover.
+  $("toStats").addEventListener("click", function (e) { openStatsPop(e.currentTarget); });
+
+  // Filter chips: "Unread", "Groups", "DMs".
+  (function () {
+    function setChipState(chip, val) {
+      chip.classList.toggle("on", !!val);
+      chip.setAttribute("aria-pressed", !!val ? "true" : "false");
+    }
+    var chipU = $("filterUnread"), chipG = $("filterGroups"), chipD = $("filterDMs");
+    setChipState(chipU, sideFilter.unread);
+    setChipState(chipG, sideFilter.kind === "group");
+    setChipState(chipD, sideFilter.kind === "dm");
+
+    chipU.addEventListener("click", function () {
+      sideFilter.unread = !sideFilter.unread;
+      setChipState(chipU, sideFilter.unread);
+      saveSideFilter();
+      if (!searchActive()) renderConversations();
+    });
+    chipG.addEventListener("click", function () {
+      sideFilter.kind = sideFilter.kind === "group" ? null : "group";
+      setChipState(chipG, sideFilter.kind === "group");
+      setChipState(chipD, false);
+      saveSideFilter();
+      if (!searchActive()) renderConversations();
+    });
+    chipD.addEventListener("click", function () {
+      sideFilter.kind = sideFilter.kind === "dm" ? null : "dm";
+      setChipState(chipD, sideFilter.kind === "dm");
+      setChipState(chipG, false);
+      saveSideFilter();
+      if (!searchActive()) renderConversations();
+    });
+  })();
+
+  // Click anywhere in the composer field (padding, border, background, typing bar)
+  // focuses the textarea, unless the click landed on an interactive element.
+  if (composerEl) {
+    composerEl.addEventListener("click", function (e) {
+      if (e.target.closest("button, a, input[type=file], .draft-att")) return;
+      if (!input.disabled) input.focus();
+    });
+  }
+  if (typingBarEl) {
+    typingBarEl.addEventListener("click", function () {
+      if (!input.disabled) input.focus();
+    });
+  }
 
   qEl.addEventListener("input", onSearchInput);
 

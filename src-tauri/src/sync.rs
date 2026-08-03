@@ -267,9 +267,11 @@ impl SyncEngine {
 
         match self.client.groups().await {
             Ok(groups) => {
+                // Collect the live ids before moving `groups` into the closure.
+                let present_ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
                 let store = self.store.clone();
                 let written = tokio::task::spawn_blocking(move || {
-                    let guard = lock_store(&store);
+                    let mut guard = lock_store(&store);
                     let mut errors = Vec::new();
                     for g in &groups {
                         // Metadata only — the lean list carries no members. Rosters
@@ -277,6 +279,13 @@ impl SyncEngine {
                         if let Err(e) = guard.upsert_group_meta(g, now) {
                             errors.push(format!("store group {}: {e}", g.id));
                         }
+                    }
+                    // Mark groups absent from the live list as former. Intentionally
+                    // called only here, on the success arm — an offline or filtered
+                    // cycle must never mark every group former just because the list
+                    // call failed or returned nothing.
+                    if let Err(e) = guard.mark_former_groups(&present_ids) {
+                        errors.push(format!("marking former groups: {e}"));
                     }
                     errors
                 })

@@ -37,6 +37,39 @@ use commands::SharedStore;
 
 use realtime::RealtimeSlot;
 
+/// User-triggered priority sync queue.
+///
+/// The frontend can call `client_sync_now` to force an immediate tail of one
+/// conversation — e.g. after returning to a thread that has been idle for a
+/// while. The command pushes to this queue and signals the notify; the sync loop
+/// drains it before its next regular cycle.
+pub struct SyncNow {
+    queue: std::sync::Mutex<Vec<(String, model::ConversationKind)>>,
+    notify: tokio::sync::Notify,
+}
+
+impl SyncNow {
+    fn new() -> Self {
+        Self {
+            queue: std::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Enqueues a conversation for priority sync and wakes the sync loop.
+    pub fn enqueue(&self, id: String, kind: model::ConversationKind) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((id, kind));
+        self.notify.notify_one();
+    }
+
+    fn drain(&self) -> Vec<(String, model::ConversationKind)> {
+        std::mem::take(&mut *self.queue.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
 pub const GROUPME_WEB_ORIGIN: &str = "https://web.groupme.com";
 pub const ARCHIVE_FILENAME: &str = "archive.db";
 pub const MEDIA_DIRNAME: &str = "media";
@@ -102,6 +135,7 @@ pub fn run() {
             commands::archive_media_path,
             commands::archive_stats,
             commands::archive_user_profile,
+            commands::archive_past_members,
             client_commands::client_send_message,
             client_commands::client_edit_message,
             client_commands::client_delete_message,
@@ -119,6 +153,7 @@ pub fn run() {
             client_commands::client_group_detail,
             client_commands::client_leave_group,
             client_commands::client_set_block,
+            client_commands::client_sync_now,
             tray::show_app_menu,
             updater::updater_check,
             updater::updater_download,
@@ -141,6 +176,7 @@ pub fn run() {
             app.manage(shared.clone());
             app.manage(client_commands::SharedClient::default());
             app.manage(RealtimeSlot::default());
+            app.manage(Arc::new(SyncNow::new()));
             // The browser-context API proxy, used only if a request is later
             // seen to be intercepted by a network filter. Constructing it just
             // installs a listener; the hidden webview is not created until the
@@ -547,7 +583,8 @@ fn start_sync(
                 ));
             }
 
-            run_sync_loop(&app, &store, &media_dir, client, &mut token_rx).await;
+            let sync_now = app.state::<Arc<SyncNow>>().inner().clone();
+            run_sync_loop(&app, &store, &media_dir, client, &mut token_rx, &sync_now).await;
             // Only returns when the token changed; loop round and rebuild.
         }
     });
@@ -582,9 +619,28 @@ async fn run_sync_loop(
     media_dir: &std::path::Path,
     client: api::GroupMeClient,
     token_rx: &mut tokio::sync::watch::Receiver<String>,
+    sync_now: &SyncNow,
 ) {
     let engine = sync::SyncEngine::new(client, store.clone(), media_dir.to_path_buf());
     loop {
+        // Drain any user-triggered priority syncs before the regular cycle.
+        for (id, kind) in sync_now.drain() {
+            match engine.sync_conversation(&id, kind).await {
+                Ok(inserted) => {
+                    log::info!("priority sync {id}: {inserted} new messages");
+                    let _ = app.emit_to(
+                        "main",
+                        "archive://synced",
+                        &sync::SyncReport {
+                            messages_inserted: inserted,
+                            ..Default::default()
+                        },
+                    );
+                }
+                Err(e) => log::warn!("priority sync {id}: {e}"),
+            }
+        }
+
         let report = engine.sync_once().await;
         log::info!(
             "sync: {} conversations, {} new messages, {} media",
@@ -629,10 +685,11 @@ async fn run_sync_loop(
             std::time::Duration::from_secs(60)
         };
 
-        // Wake early if the token rotates, rather than spending the delay
-        // holding a client that is already dead.
+        // Wake early if the token rotates or a priority sync is requested,
+        // rather than spending the delay holding a stale client.
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
+            _ = sync_now.notify.notified() => {}
             changed = token_rx.changed() => {
                 if changed.is_err() {
                     return;
