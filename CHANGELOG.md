@@ -2,6 +2,27 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.12.0] — 2026-08-03
+
+Hardening for 1.0: the updater routes around the filter, a blank window heals
+itself, and the leaderboard stops freezing the app.
+
+### Fixed
+
+- **Updating works on filtered networks.** When the installer download is
+  blocked (a content filter that allows browsing but kills the download host),
+  the update dialog now offers "Download in browser" — one click opens the
+  release page, where the download succeeds. Signature failures deliberately
+  never offer this: if verification fails, routing around it is the wrong move.
+- **A blank window heals itself.** When the webview fails to attach at launch
+  (orphaned WebView2 processes holding the profile), the watchdog now rebuilds
+  the window once — the restart-shaped fix, automated — instead of only writing
+  advice to the log. Window-bound listeners were made rebuild-proof.
+- **The all-groups leaderboard no longer freezes the app.** On a million-message
+  archive it takes ~20 seconds to compute; it now runs on its own read-only
+  database connection, so reading messages and searching stay instant while it
+  works. Group stats and profile cards take the same path.
+
 ## [0.11.0] — 2026-08-03
 
 The messenger finally speaks up, and the client gets its finishing pass.

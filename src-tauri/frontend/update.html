@@ -192,10 +192,30 @@
   body.ready .notes,
   body.error .notes { display: block; }
 
-  #download, #restart, #retry { display: none; }
+  #download, #restart, #retry, #browser-dl { display: none; }
   body.available #download,
   body.ready #restart,
   body.error #retry { display: inline-block; }
+
+  /* "Download in browser" shown by JS when downloadBlocked is set on the error
+     payload — only for network/filter failures, never for signature errors. */
+
+  /* Quiet text-link button for the release page, shown on update-available. */
+  #release-link {
+    display: none;
+    background: none;
+    border: none;
+    padding: 0;
+    margin-top: -.125rem;
+    color: var(--fg-soft);
+    font-size: .75rem;
+    font-family: var(--font-ui);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    align-self: flex-start;
+  }
+  #release-link:hover { color: var(--fg); }
 
   @media (prefers-reduced-motion: reduce) {
     .spin { animation: none; opacity: 1; }
@@ -233,11 +253,13 @@
   </div>
   <div class="bar"><i id="pct"></i></div>
   <div class="notes" id="notes"></div>
+  <button id="release-link">Open the release page &#x2197;</button>
 </main>
 
 <footer>
   <button id="close2">Close</button>
   <button class="primary" id="retry">Try again</button>
+  <button class="primary" id="browser-dl">Download in browser</button>
   <button class="primary" id="download">Download</button>
   <button class="primary" id="restart">Restart &amp; install</button>
 </footer>
@@ -274,6 +296,10 @@
     p = p || {};
     if (p.currentVersion) $("cur").textContent = String(p.currentVersion);
 
+    // Reset per-phase extras; individual branches enable them as needed.
+    $("browser-dl").style.display = "";
+    $("release-link").style.display = "";
+
     if (event === "updater://checking") {
       state("checking");
       say("Checking for updates…");
@@ -287,6 +313,7 @@
       state("available");
       say("Version ", p.version, " is available.");
       notes(p.notes);
+      if (p.releaseUrl) $("release-link").style.display = "inline-block";
     } else if (event === "updater://downloading") {
       state("downloading");
       say("Downloading version ", p.version, "…");
@@ -299,6 +326,7 @@
       state("error");
       say("Couldn't check for updates.");
       notes(p.message);
+      if (p.downloadBlocked) $("browser-dl").style.display = "inline-block";
     }
   }
 
@@ -344,6 +372,8 @@
   $("close").onclick = hide;
   $("close2").onclick = hide;
   $("retry").onclick = function () { invoke("updater_check").catch(function () {}); };
+  $("browser-dl").onclick = function () { invoke("updater_open_release_page").catch(function () {}); };
+  $("release-link").onclick = function () { invoke("updater_open_release_page").catch(function () {}); };
   $("download").onclick = function () { invoke("updater_download").catch(function () {}); };
   $("restart").onclick = function () { invoke("updater_restart").catch(function () {}); };
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });

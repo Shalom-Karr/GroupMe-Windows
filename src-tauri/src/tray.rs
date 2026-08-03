@@ -119,7 +119,8 @@ pub fn init(app: &tauri::AppHandle) -> tauri::Result<()> {
     );
     let account = read_meta(app, META_ACCOUNT_NAME);
     build_tray(app, account)?;
-    hook_close_to_tray(app);
+    // close-to-tray hook is attached in lib::build_main_window so that any
+    // rebuilt window (watchdog recovery) gets the same intercept.
     Ok(())
 }
 
@@ -457,13 +458,12 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
     Ok(())
 }
 
-/// Intercept the main window's close: hide instead of destroy, so the sync
+/// Intercept the given window's close: hide instead of destroy, so the sync
 /// worker keeps the archive current while the app is "closed".
-fn hook_close_to_tray(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        log::warn!("tray: no `{MAIN_WINDOW}` window — close-to-tray not installed");
-        return;
-    };
+///
+/// Called by `lib::build_main_window` rather than `init`, so the hook is
+/// attached to every window built — including one rebuilt by the watchdog.
+pub fn hook_close_to_tray(window: &tauri::WebviewWindow) {
     let win = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {

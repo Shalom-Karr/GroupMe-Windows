@@ -64,6 +64,60 @@ where
     }
 }
 
+/// Like [`read_store`] but for heavy analytic queries (leaderboard, group stats,
+/// user profile) that can hold the mutex for tens of seconds on a 1M-message
+/// archive.
+///
+/// Takes the mutex ONLY long enough to call [`Store::open_readonly`] — which
+/// is cheap (a single `sqlite3_open` call) — then drops the guard before running
+/// the closure against the side connection. A WAL read-only connection sees a
+/// consistent snapshot and never blocks the writer or other readers.
+///
+/// Falls back transparently to the locked path when `open_readonly` fails (in-
+/// memory stores in tests, or an exotic OS error) so no functionality is lost.
+async fn read_store_analytics<T, F>(
+    store: &SharedStore,
+    context: &'static str,
+    f: F,
+) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&rusqlite::Connection) -> anyhow::Result<T> + Send + 'static,
+{
+    let store = store.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        // Phase 1: hold the lock only long enough to open a read-only side
+        // connection. The guard is dropped before the heavy query runs.
+        let side_conn = {
+            let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+            guard.open_readonly()
+        };
+
+        match side_conn {
+            Ok(conn) => {
+                // Lock released. Run the heavy query on the side connection.
+                // WAL read-only: consistent snapshot, never blocks writer or
+                // other readers — that is the point of this helper.
+                f(&conn)
+            }
+            Err(_) => {
+                // In-memory store (tests) or unexpected path error. Fall back
+                // to the main locked connection so nothing breaks.
+                log::debug!("{context}: no side connection, using locked store");
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                f(guard.conn())
+            }
+        }
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(fail(context, format!("{e:#}"))),
+        Err(e) => Err(fail(context, e)),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ArchiveStats {
     pub conversations: usize,
@@ -209,8 +263,8 @@ pub async fn archive_user_profile(
     store: State<'_, SharedStore>,
     user_id: String,
 ) -> CmdResult<UserProfile> {
-    read_store(store.inner(), "loading a user profile", move |s| {
-        s.user_profile(&user_id)
+    read_store_analytics(store.inner(), "loading a user profile", move |conn| {
+        Store::user_profile_on(conn, &user_id)
     })
     .await
 }
@@ -249,8 +303,8 @@ pub async fn archive_group_stats(
     store: State<'_, SharedStore>,
     conversation_id: String,
 ) -> CmdResult<crate::store::GroupStatsData> {
-    read_store(store.inner(), "loading group stats", move |s| {
-        s.group_stats(&conversation_id)
+    read_store_analytics(store.inner(), "loading group stats", move |conn| {
+        Store::group_stats_on(conn, &conversation_id)
     })
     .await
 }
@@ -265,8 +319,8 @@ pub async fn archive_leaderboard(
     conversation_id: Option<String>,
     since_unix: Option<i64>,
 ) -> CmdResult<Vec<crate::store::LeaderboardRow>> {
-    read_store(store.inner(), "loading leaderboard", move |s| {
-        s.leaderboard(conversation_id.as_deref(), since_unix)
+    read_store_analytics(store.inner(), "loading leaderboard", move |conn| {
+        Store::leaderboard_on(conn, conversation_id.as_deref(), since_unix)
     })
     .await
 }

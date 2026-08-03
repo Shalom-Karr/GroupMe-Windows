@@ -164,6 +164,7 @@ pub fn run() {
             updater::updater_restart,
             updater::updater_version,
             updater::updater_last_status,
+            updater::updater_open_release_page,
         ])
         .setup(|app| {
             // LOCAL app data, not roaming. `app_data_dir()` resolves to
@@ -189,15 +190,9 @@ pub fn run() {
 
             // Built here rather than declared in tauri.conf.json because an
             // initialization script can only be attached at window-build time.
-            let window =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::App(ROUTER_PAGE.into()))
-                    .title("GroupMe")
-                    .inner_size(1200.0, 820.0)
-                    .min_inner_size(800.0, 600.0)
-                    .resizable(true)
-                    .center()
-                    .initialization_script(INJECT_JS)
-                    .build()?;
+            // The returned handle is not stored — listeners that navigate the
+            // window resolve it by label at each use, so a rebuild is transparent.
+            build_main_window(app.handle())?;
 
             tray::init(app.handle())?;
             updater::spawn_periodic_check(app.handle().clone());
@@ -219,8 +214,8 @@ pub fn run() {
             spawn_page_diagnostics(app.handle().clone());
             spawn_webview_watchdog(app.handle().clone());
             spawn_token_listener(app.handle().clone(), shared.clone(), media_dir.clone());
-            spawn_ui_switch_listener(app.handle().clone(), window.clone());
-            spawn_connectivity_watch(app.handle().clone(), window, shared.clone());
+            spawn_ui_switch_listener(app.handle().clone());
+            spawn_connectivity_watch(app.handle().clone(), shared.clone());
 
             // A token persisted by a previous session starts the sync loop —
             // and therefore the client surface and realtime — without needing
@@ -269,6 +264,30 @@ pub fn run() {
 /// reliable signal that the webview never came up — see the watchdog below.
 static PAGE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Guards the one-shot webview rebuild so the watchdog never retries more than
+/// once per process lifetime, even if it somehow ran twice.
+static RECOVERY_ATTEMPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Builds the "main" window with its initialization script and close-to-tray hook.
+///
+/// Extracted from `setup` so the webview watchdog can rebuild it on the rare
+/// occasion WebView2 fails to attach (blank-window / E_INVALIDARG race). Every
+/// window built here — including after a recovery — gets the same hook, so the
+/// rebuilt window behaves identically to the original one.
+fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App(ROUTER_PAGE.into()))
+        .title("GroupMe")
+        .inner_size(1200.0, 820.0)
+        .min_inner_size(800.0, 600.0)
+        .resizable(true)
+        .center()
+        .initialization_script(INJECT_JS)
+        .build()?;
+    tray::hook_close_to_tray(&window);
+    Ok(window)
+}
+
 /// Turns a silently broken window into a diagnosable one.
 ///
 /// `WebviewWindowBuilder::build()` can return `Ok` while WebView2 has failed to
@@ -290,33 +309,77 @@ static PAGE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// losing, and an automatic restart risks a loop that is worse than a message.
 fn spawn_webview_watchdog(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
+        // First check — 15s after the window was built.
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         if PAGE_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
 
-        log::error!(
-            "no page reported in 15s — the webview almost certainly failed to attach, so the \
-             window is blank while the archive keeps syncing normally. Look for \
-             `failed to create webview` above; 0x80070057 means another WebView2 process still \
-             holds {}. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
-             msedgewebview2.exe for this app remains, then reopen.",
-            "the app's user-data folder"
+        // No beacon yet. Attempt one rebuild — but only once per process
+        // lifetime; a second invocation (e.g. if this task were ever spawned
+        // twice) skips straight to the advisory error.
+        if RECOVERY_ATTEMPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            report_blank_window(&app);
+            return;
+        }
+
+        log::warn!(
+            "no page reported in 15s — destroying and rebuilding the main webview \
+             (one attempt; E_INVALIDARG race suspected)"
         );
 
-        // The tray is the only surface still working in this state, so the
-        // notification is the one channel that can reach the user at all.
-        use tauri_plugin_notification::NotificationExt;
-        let _ = app
-            .notification()
-            .builder()
-            .title("GroupMe could not draw its window")
-            .body(
-                "The window is blank because the webview failed to start. Your messages are \
-                 still being archived. Quit from the tray icon and reopen to fix it.",
-            )
-            .show();
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.destroy();
+        }
+
+        // Give any orphaned msedgewebview2.exe processes a beat to release the
+        // user-data folder before we try to open it again.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Reset the beacon so the second check is meaningful.
+        PAGE_SEEN.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if let Err(e) = build_main_window(&app) {
+            log::error!("webview rebuild failed: {e}");
+            report_blank_window(&app);
+            return;
+        }
+
+        // Second check — 15s after the rebuilt window was created.
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        if PAGE_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info!("webview recovered after rebuild");
+        } else {
+            report_blank_window(&app);
+        }
     });
+}
+
+/// Logs the detailed blank-window advisory and sends a system notification.
+///
+/// Called by the watchdog when neither the first nor the recovered window
+/// produced a page beacon. The tray is the only surface still working in this
+/// state, so the notification is the one channel that can reach the user.
+fn report_blank_window(app: &tauri::AppHandle) {
+    log::error!(
+        "no page reported in 15s — the webview almost certainly failed to attach, so the \
+         window is blank while the archive keeps syncing normally. Look for \
+         `failed to create webview` above; 0x80070057 means another WebView2 process still \
+         holds {}. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
+         msedgewebview2.exe for this app remains, then reopen.",
+        "the app's user-data folder"
+    );
+
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title("GroupMe could not draw its window")
+        .body(
+            "The window is blank because the webview failed to start. Your messages are \
+             still being archived. Quit from the tray icon and reopen to fix it.",
+        )
+        .show();
 }
 
 fn spawn_page_diagnostics(app: tauri::AppHandle) {
@@ -711,7 +774,7 @@ async fn run_sync_loop(
 /// The event is forgeable by anything running on the GroupMe page, so the
 /// payload is not trusted: it is re-validated here and the only thing a forgery
 /// can achieve is switching between two surfaces the user already has.
-fn spawn_ui_switch_listener(app: tauri::AppHandle, window: tauri::WebviewWindow) {
+fn spawn_ui_switch_listener(app: tauri::AppHandle) {
     let handle = app.clone();
     app.listen("groupme://switch-ui", move |event| {
         let ui: String = serde_json::from_str::<serde_json::Value>(event.payload())
@@ -743,17 +806,18 @@ fn spawn_ui_switch_listener(app: tauri::AppHandle, window: tauri::WebviewWindow)
             }
         };
         log::info!("switching surface to {ui}");
-        let _ = window.navigate(target);
+        // Resolve by label so the navigate works after a watchdog rebuild.
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.navigate(target);
+        } else {
+            log::debug!("switch-ui: main window absent (mid-rebuild?), skipping navigate");
+        }
     });
 }
 
 /// Swaps the window between the live client and the local reader as the network
 /// comes and goes.
-fn spawn_connectivity_watch(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    store: SharedStore,
-) {
+fn spawn_connectivity_watch(app: tauri::AppHandle, store: SharedStore) {
     let monitor = Arc::new(connectivity::ConnectivityMonitor::new(
         connectivity::HttpProbe::new(),
     ));
@@ -811,29 +875,41 @@ fn spawn_connectivity_watch(
                     connectivity::Connectivity::Offline => "offline",
                 },
             );
+            // All navigate calls resolve the window by label so a watchdog
+            // rebuild is transparent — we never hold a stale handle.
             match state {
                 connectivity::Connectivity::Offline => {
                     // The custom client reads from the archive over IPC, so it
                     // works offline as-is — writes fail with inline errors.
                     // Yanking it to the reader would only lose scroll position.
-                    if on_client_page(&window) {
+                    if on_client_page(&app) {
                         log::info!("offline — staying on the custom client (reads are local)");
-                    } else {
+                    } else if let Some(window) = app.get_webview_window("main") {
                         log::info!("offline — switching to the local archive");
                         let _ = window.navigate(offline_url());
+                    } else {
+                        log::debug!(
+                            "offline: main window absent (mid-rebuild?), skipping navigate"
+                        );
                     }
                 }
                 connectivity::Connectivity::Online => {
                     // Only pull the user back if they are actually sitting on
                     // the offline reader. Navigating a working session would
                     // throw away their scroll position for no reason.
-                    if on_local_page(&window) {
+                    if on_local_page(&app) {
                         let ui = preferred_ui(&store).await;
                         log::info!("back online — returning to the {ui} surface");
-                        if ui == client_commands::UI_CLIENT {
-                            let _ = window.navigate(client_url());
-                        } else if let Ok(url) = GROUPME_WEB_ORIGIN.parse() {
-                            let _ = window.navigate(url);
+                        if let Some(window) = app.get_webview_window("main") {
+                            if ui == client_commands::UI_CLIENT {
+                                let _ = window.navigate(client_url());
+                            } else if let Ok(url) = GROUPME_WEB_ORIGIN.parse() {
+                                let _ = window.navigate(url);
+                            }
+                        } else {
+                            log::debug!(
+                                "online: main window absent (mid-rebuild?), skipping navigate"
+                            );
                         }
                     }
                 }
@@ -857,7 +933,10 @@ fn client_url() -> tauri::Url {
         .unwrap_or_else(|_| "about:blank".parse().expect("static url"))
 }
 
-fn on_local_page(window: &tauri::WebviewWindow) -> bool {
+fn on_local_page(app: &tauri::AppHandle) -> bool {
+    let Some(window) = app.get_webview_window("main") else {
+        return false;
+    };
     window
         .url()
         .map(|u| {
@@ -867,7 +946,10 @@ fn on_local_page(window: &tauri::WebviewWindow) -> bool {
         .unwrap_or(false)
 }
 
-fn on_client_page(window: &tauri::WebviewWindow) -> bool {
+fn on_client_page(app: &tauri::AppHandle) -> bool {
+    let Some(window) = app.get_webview_window("main") else {
+        return false;
+    };
     window
         .url()
         .map(|u| u.as_str().contains(CLIENT_PAGE))

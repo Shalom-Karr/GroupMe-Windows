@@ -43,11 +43,11 @@
 //! |-------------------------------|----------------------------------------------------------|
 //! | `updater://checking`          | `{ userInitiated, currentVersion }`                       |
 //! | `updater://up-to-date`        | `{ userInitiated, currentVersion }`                       |
-//! | `updater://update-available`  | `{ userInitiated, currentVersion, version, notes }`       |
-//! | `updater://downloading`       | `{ userInitiated, currentVersion, version, notes }`       |
-//! | `updater://download-progress` | `{ downloaded, total, percent }` (`total`/`percent` null) |
-//! | `updater://ready`             | `{ userInitiated, currentVersion, version, notes }`       |
-//! | `updater://error`             | `{ userInitiated, message }`                              |
+//! | `updater://update-available`  | `{ userInitiated, currentVersion, version, notes, releaseUrl }` |
+//! | `updater://downloading`       | `{ userInitiated, currentVersion, version, notes }`             |
+//! | `updater://download-progress` | `{ downloaded, total, percent }` (`total`/`percent` null)       |
+//! | `updater://ready`             | `{ userInitiated, currentVersion, version, notes }`             |
+//! | `updater://error`             | `{ userInitiated, message, downloadBlocked?, releaseUrl? }`     |
 //!
 //! Phases (not progress ticks) are cached in `LAST_STATUS` and served by
 //! [`updater_last_status`], so a dialog that opens *after* a check resolved
@@ -69,8 +69,30 @@ pub const EVENT_PROGRESS: &str = "updater://download-progress";
 pub const EVENT_READY: &str = "updater://ready";
 pub const EVENT_ERROR: &str = "updater://error";
 
+/// GitHub releases page — the manual download fallback shown when a content
+/// filter blocks `objects.githubusercontent.com`.
+pub const RELEASE_URL: &str = "https://github.com/Shalom-Karr/groupme-windows/releases/latest";
+
 /// Label and page of the small frameless status dialog.
 pub const WINDOW_LABEL: &str = "updater";
+
+/// Returns `true` when the error is plausibly caused by a content filter
+/// blocking the download — i.e. it is NOT a signature-verification failure.
+///
+/// Signature failures must never be classified as "blocked": the tamper case
+/// (a forged or corrupted update) would then suggest the user fetch from GitHub,
+/// which hands them the same tampered binary through a different route.
+/// Everything else — network, timeout, HTTP, JSON, config — is infrastructure
+/// the user's browser or a manual download can work around.
+fn is_download_blocked(e: &tauri_plugin_updater::Error) -> bool {
+    !matches!(
+        e,
+        tauri_plugin_updater::Error::Minisign(_)
+            | tauri_plugin_updater::Error::SignatureUtf8(_)
+            | tauri_plugin_updater::Error::Base64(_)
+    )
+}
+
 const DIALOG_PAGE: &str = "update.html";
 
 /// Let the app settle before the first check. Startup is already contending for
@@ -233,7 +255,8 @@ async fn run(app: &AppHandle, trigger: Trigger) {
     }
     let _guard = CheckGuard;
 
-    if let Err(message) = try_run(app, trigger).await {
+    if let Err(e) = try_run(app, trigger).await {
+        let message = e.to_string();
         if user_initiated {
             log::error!("update check failed: {message}");
         } else {
@@ -247,15 +270,16 @@ async fn run(app: &AppHandle, trigger: Trigger) {
         // "Checking…". And it is deliberately its own phase — reporting a
         // network failure as "up to date" would tell the user they are current
         // when nobody actually knows.
-        emit_status(
-            app,
-            EVENT_ERROR,
-            json!({ "userInitiated": user_initiated, "message": message }),
-        );
+        let mut payload = json!({ "userInitiated": user_initiated, "message": message });
+        if is_download_blocked(&e) {
+            payload["downloadBlocked"] = json!(true);
+            payload["releaseUrl"] = json!(RELEASE_URL);
+        }
+        emit_status(app, EVENT_ERROR, payload);
     }
 }
 
-async fn try_run(app: &AppHandle, trigger: Trigger) -> Result<(), String> {
+async fn try_run(app: &AppHandle, trigger: Trigger) -> Result<(), tauri_plugin_updater::Error> {
     let current = version_of(app);
     let user_initiated = trigger.user_initiated();
 
@@ -268,10 +292,9 @@ async fn try_run(app: &AppHandle, trigger: Trigger) -> Result<(), String> {
     let updater = app
         .updater_builder()
         .timeout(Duration::from_secs(UPDATE_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+        .build()?;
 
-    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+    let Some(update) = updater.check().await? else {
         // Always emitted, background or not. A user-initiated check that says
         // nothing looks broken, and the phase costs nothing when no dialog is
         // listening.
@@ -289,6 +312,7 @@ async fn try_run(app: &AppHandle, trigger: Trigger) -> Result<(), String> {
         "currentVersion": current,
         "version": version,
         "notes": update.body.clone(),
+        "releaseUrl": RELEASE_URL,
     });
 
     // Already staged this exact version? Skip the identical re-download the
@@ -340,8 +364,7 @@ async fn try_run(app: &AppHandle, trigger: Trigger) -> Result<(), String> {
             },
             || {},
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     *lock(staged()) = Some(StagedUpdate { update, bytes });
     emit_status(app, EVENT_READY, found);
@@ -423,6 +446,19 @@ pub fn updater_last_status() -> Option<serde_json::Value> {
     lock(last_status()).clone()
 }
 
+/// Opens the GitHub releases page in the system browser.
+///
+/// Invoked from the update dialog when a download fails due to a content filter
+/// blocking `objects.githubusercontent.com`. The opener plugin is called
+/// Rust-side so the updater window needs no `opener:default` capability.
+#[tauri::command]
+pub fn updater_open_release_page(app: AppHandle) {
+    use tauri_plugin_opener::OpenerExt;
+    if let Err(e) = app.opener().open_url(RELEASE_URL, None::<&str>) {
+        log::warn!("could not open release page in browser: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +494,7 @@ mod tests {
             "updater_restart",
             "updater_version",
             "updater_last_status",
+            "updater_open_release_page",
         ] {
             if DIALOG_HTML.contains(command) {
                 assert!(

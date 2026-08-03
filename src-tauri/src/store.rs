@@ -15,7 +15,7 @@
 //!   External-content means the text is not duplicated on disk.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -67,6 +67,9 @@ const SCHEMA_V4: &[&str] =
 
 pub struct Store {
     conn: Connection,
+    /// Database file path. `None` for in-memory stores; `open_readonly` errors
+    /// in that case rather than returning a useless shared in-memory connection.
+    db_path: Option<std::path::PathBuf>,
 }
 
 /// Conversation and message totals split by conversation kind.
@@ -100,16 +103,16 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening archive at {}", path.display()))?;
-        Self::from_conn(conn)
+        Self::from_conn(conn, Some(path.to_path_buf()))
     }
 
     /// In-memory archive. Used by the test suite so the whole store layer is
     /// exercised without touching disk or the network.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_conn(Connection::open_in_memory()?)
+        Self::from_conn(Connection::open_in_memory()?, None)
     }
 
-    fn from_conn(conn: Connection) -> Result<Self> {
+    fn from_conn(conn: Connection, db_path: Option<std::path::PathBuf>) -> Result<Self> {
         // WAL so the sync worker writing does not block the UI reading.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -140,9 +143,49 @@ impl Store {
         // archive charges every page touched to the process working set, which
         // is exactly the number a user watching Task Manager reacts to, and it
         // buys throughput this app does not need — it reads 60 rows at a time.
-        let mut store = Self { conn };
+        let mut store = Self { conn, db_path };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Opens a new read-only connection to the same database file so heavy
+    /// analytic queries can run without holding the shared mutex.
+    ///
+    /// Returns `Err` for in-memory stores (no path to open) or any OS error.
+    /// Callers must fall back to the locked path on error.
+    ///
+    /// WAL note: a read-only connection in WAL mode sees a consistent snapshot
+    /// at the time it begins reading and never blocks the writer or other
+    /// readers — that is precisely why heavy queries use this instead of the
+    /// main connection.
+    pub fn open_readonly(&self) -> Result<Connection> {
+        let path = self
+            .db_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no side connection for in-memory store"))?;
+        // SQLITE_OPEN_READ_ONLY so SQLite enforces the intent at the OS level.
+        // SQLITE_OPEN_NO_MUTEX because this connection is used from a single
+        // thread inside spawn_blocking — the default serialized mode adds lock
+        // overhead with no benefit here.
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // WAL: must be set so the connection participates in the WAL protocol.
+        // Other pragmas mirror the main connection where relevant for reads;
+        // write-only ones (synchronous, foreign_keys, journal_size_limit) are
+        // omitted.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "cache_size", -4_000i32)?;
+        conn.pragma_update(None, "temp_store", "FILE")?;
+        conn.pragma_update(None, "busy_timeout", 5_000i32)?;
+        Ok(conn)
+    }
+
+    /// Raw connection accessor for the analytics fallback path in `commands.rs`.
+    /// Not part of the public API; callers must prefer `open_readonly`.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     fn migrate(&mut self) -> Result<()> {
@@ -1028,21 +1071,11 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Everything the archive knows about one person: their name and avatar, the
-    /// groups you both belong to, whether a DM with them exists, and how much of
-    /// their history is stored. Read-only; drives the profile card.
-    ///
-    /// Membership is not indexed — it lives only in each group's `members_json`
-    /// — so shared groups are found by scanning the (few hundred) groups and
-    /// parsing their member lists. That is fine for an on-demand, one-user
-    /// lookup and avoids a second membership table the sync would have to keep
-    /// in step.
-    pub fn user_profile(&self, user_id: &str) -> Result<UserProfile> {
+    pub(crate) fn user_profile_on(conn: &Connection, user_id: &str) -> Result<UserProfile> {
         // Identity: the users table is the canonical name/avatar, but a person
         // we have messages from may predate ever being upserted there, so fall
         // back to their most recent message.
-        let (mut name, mut avatar_url): (Option<String>, Option<String>) = self
-            .conn
+        let (mut name, mut avatar_url): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT name, avatar_url FROM users WHERE id = ?1",
                 [user_id],
@@ -1051,8 +1084,7 @@ impl Store {
             .optional()?
             .unwrap_or((None, None));
         if name.is_none() || avatar_url.is_none() {
-            if let Some((n, a)) = self
-                .conn
+            if let Some((n, a)) = conn
                 .query_row(
                     "SELECT name, avatar_url FROM messages
                      WHERE user_id = ?1 AND name IS NOT NULL
@@ -1075,7 +1107,7 @@ impl Store {
         // Shared groups: scan each group's stored member list for this user.
         let mut shared_groups = Vec::new();
         {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT id, name, image_url, members_json FROM conversations
                  WHERE kind = 'group' AND members_json IS NOT NULL",
             )?;
@@ -1115,8 +1147,7 @@ impl Store {
 
         // A DM is stored under the other participant's bare user id, so the DM's
         // conversation id is exactly `user_id` when one exists.
-        let dm_conversation_id: Option<String> = self
-            .conn
+        let dm_conversation_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM conversations WHERE kind = 'dm' AND id = ?1",
                 [user_id],
@@ -1124,7 +1155,7 @@ impl Store {
             )
             .optional()?;
 
-        let (message_count, first_seen, last_seen) = self.conn.query_row(
+        let (message_count, first_seen, last_seen) = conn.query_row(
             "SELECT COUNT(*), MIN(created_at), MAX(created_at)
              FROM messages WHERE user_id = ?1",
             [user_id],
@@ -1149,22 +1180,25 @@ impl Store {
         })
     }
 
-    /// Past participants of a conversation: message senders who are no longer in
-    /// the current member roster.
+    /// Everything the archive knows about one person: their name and avatar, the
+    /// groups you both belong to, whether a DM with them exists, and how much of
+    /// their history is stored. Read-only; drives the profile card.
     ///
-    /// Name and avatar come from the sender's most recent message in this
-    /// conversation, so they reflect what they looked like last time they posted
-    /// rather than what the archive holds for them globally. System messages are
-    /// excluded; NULL user_ids are excluded. Current roster members are excluded
-    /// by parsing `members_json` from the stored conversation row.
-    ///
-    /// Intended for the "former members" panel of a conversation info sheet — it
-    /// answers "who used to post here?" without requiring a live API call.
-    pub fn past_members(&self, conversation_id: &str) -> Result<Vec<PastMember>> {
-        // Parse the current roster so we can exclude them from the results.
+    /// Membership is not indexed — it lives only in each group's `members_json`
+    /// — so shared groups are found by scanning the (few hundred) groups and
+    /// parsing their member lists. That is fine for an on-demand, one-user
+    /// lookup and avoids a second membership table the sync would have to keep
+    /// in step.
+    pub fn user_profile(&self, user_id: &str) -> Result<UserProfile> {
+        Self::user_profile_on(&self.conn, user_id)
+    }
+
+    pub(crate) fn past_members_on(
+        conn: &Connection,
+        conversation_id: &str,
+    ) -> Result<Vec<PastMember>> {
         let current: std::collections::HashSet<String> = {
-            let raw: Option<String> = self
-                .conn
+            let raw: Option<String> = conn
                 .query_row(
                     "SELECT members_json FROM conversations WHERE id = ?1",
                     params![conversation_id],
@@ -1182,7 +1216,7 @@ impl Store {
             }
         };
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT
                 m.user_id,
                 (SELECT mm.name FROM messages mm
@@ -1225,6 +1259,21 @@ impl Store {
         Ok(out)
     }
 
+    /// Past participants of a conversation: message senders who are no longer in
+    /// the current member roster.
+    ///
+    /// Name and avatar come from the sender's most recent message in this
+    /// conversation, so they reflect what they looked like last time they posted
+    /// rather than what the archive holds for them globally. System messages are
+    /// excluded; NULL user_ids are excluded. Current roster members are excluded
+    /// by parsing `members_json` from the stored conversation row.
+    ///
+    /// Intended for the "former members" panel of a conversation info sheet — it
+    /// answers "who used to post here?" without requiring a live API call.
+    pub fn past_members(&self, conversation_id: &str) -> Result<Vec<PastMember>> {
+        Self::past_members_on(&self.conn, conversation_id)
+    }
+
     // ------------------------------------------------- analytics / stats
 
     /// The id of the chronologically oldest message in a conversation (by
@@ -1241,17 +1290,11 @@ impl Store {
             .optional()?)
     }
 
-    /// Conversation-level stats for the group info panel.
-    ///
-    /// All sender-based counts exclude `system=1` rows. The 30-day window is
-    /// always relative to the moment of the call via `now_unix()`.
-    /// `avg_active_per_day_30d` sums `COUNT(DISTINCT user_id)` per calendar
-    /// day (UTC midnight bucketing via `created_at / 86400`) across the last 30
-    /// days and divides by 30.0 — days with zero activity count as zero, so the
-    /// denominator is always exactly 30.
-    pub fn group_stats(&self, conversation_id: &str) -> Result<GroupStatsData> {
-        let created_at: Option<i64> = self
-            .conn
+    pub(crate) fn group_stats_on(
+        conn: &Connection,
+        conversation_id: &str,
+    ) -> Result<GroupStatsData> {
+        let created_at: Option<i64> = conn
             .query_row(
                 "SELECT CASE WHEN created_at = 0 THEN NULL ELSE created_at END
                  FROM conversations WHERE id = ?1",
@@ -1261,14 +1304,13 @@ impl Store {
             .optional()?
             .flatten();
 
-        let message_count: i64 = self.conn.query_row(
+        let message_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
             params![conversation_id],
             |r| r.get(0),
         )?;
 
-        let first = self
-            .conn
+        let first = conn
             .query_row(
                 "SELECT id, created_at, name FROM messages
                  WHERE conversation_id = ?1 ORDER BY id_sort ASC LIMIT 1",
@@ -1283,8 +1325,7 @@ impl Store {
             )
             .optional()?;
 
-        let last = self
-            .conn
+        let last = conn
             .query_row(
                 "SELECT id, created_at FROM messages
                  WHERE conversation_id = ?1 ORDER BY id_sort DESC LIMIT 1",
@@ -1293,7 +1334,7 @@ impl Store {
             )
             .optional()?;
 
-        let distinct_senders: i64 = self.conn.query_row(
+        let distinct_senders: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT user_id) FROM messages
              WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL",
             params![conversation_id],
@@ -1302,7 +1343,7 @@ impl Store {
 
         let cutoff = now_unix() - 30 * 86400;
 
-        let active_last_30d: i64 = self.conn.query_row(
+        let active_last_30d: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT user_id) FROM messages
              WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL
                AND created_at >= ?2",
@@ -1310,7 +1351,7 @@ impl Store {
             |r| r.get(0),
         )?;
 
-        let messages_last_30d: i64 = self.conn.query_row(
+        let messages_last_30d: i64 = conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND created_at >= ?2",
             params![conversation_id, cutoff],
             |r| r.get(0),
@@ -1319,7 +1360,7 @@ impl Store {
         // Sum COUNT(DISTINCT user_id) per UTC calendar day over the 30d window,
         // then divide by 30. Days with no messages are absent from the inner
         // result and contribute 0 to the sum — exact denominator.
-        let daily_distinct_sum: i64 = self.conn.query_row(
+        let daily_distinct_sum: i64 = conn.query_row(
             "SELECT COALESCE(SUM(cnt), 0) FROM (
                      SELECT COUNT(DISTINCT user_id) AS cnt
                      FROM messages
@@ -1335,8 +1376,7 @@ impl Store {
         // `created_at / 86400 * 86400` is UTC midnight bucketing: integer
         // division truncates to the day boundary, multiply restores the unix
         // timestamp of that midnight.
-        let busiest = self
-            .conn
+        let busiest = conn
             .query_row(
                 "SELECT created_at / 86400 * 86400, COUNT(*) AS cnt
                  FROM messages WHERE conversation_id = ?1
@@ -1347,8 +1387,7 @@ impl Store {
             )
             .optional()?;
 
-        let top = self
-            .conn
+        let top = conn
             .query_row(
                 "SELECT user_id, name, COUNT(*) AS cnt
                  FROM messages
@@ -1386,27 +1425,20 @@ impl Store {
         })
     }
 
-    /// Per-user gamification leaderboard.
+    /// Conversation-level stats for the group info panel.
     ///
-    /// `conversation_id` `None` = across all conversations of `kind='group'`
-    /// (DMs are excluded regardless). `since_unix` `None` = all time.
-    ///
-    /// Points: `messages×1 + likes_received×20 + likes_given×10 − leaves×25
-    /// − kicks×500 − deleted×5`. The source economy also penalises inactive
-    /// months on all-time boards; that penalty is omitted for v1.
-    ///
-    /// Events are resolved from system messages' `raw_json`:
-    /// * **kick**: `membership.*` event, `removed_user` present, `remover_user`
-    ///   present and different from `removed_user`.
-    /// * **leave**: `membership.*` event, `removed_user` present, `remover_user`
-    ///   absent or equal to `removed_user` (a self-removal).
-    /// * **deleted**: `message.deleted` event; `message_id` is resolved to its
-    ///   author via JOIN within the same conversation; unresolvable rows skipped.
-    ///
-    /// GroupMe membership event ids are JSON numbers, not strings. `CAST(…AS TEXT)`
-    /// normalises both forms so they compare correctly against `user_id` TEXT values.
-    pub fn leaderboard(
-        &self,
+    /// All sender-based counts exclude `system=1` rows. The 30-day window is
+    /// always relative to the moment of the call via `now_unix()`.
+    /// `avg_active_per_day_30d` sums `COUNT(DISTINCT user_id)` per calendar
+    /// day (UTC midnight bucketing via `created_at / 86400`) across the last 30
+    /// days and divides by 30.0 — days with zero activity count as zero, so the
+    /// denominator is always exactly 30.
+    pub fn group_stats(&self, conversation_id: &str) -> Result<GroupStatsData> {
+        Self::group_stats_on(&self.conn, conversation_id)
+    }
+
+    pub(crate) fn leaderboard_on(
+        conn: &Connection,
         conversation_id: Option<&str>,
         since_unix: Option<i64>,
     ) -> Result<Vec<LeaderboardRow>> {
@@ -1533,7 +1565,7 @@ LEFT JOIN deleted d     ON d.user_id = au.user_id
 ORDER BY points DESC
 LIMIT 100";
 
-        let mut stmt = self.conn.prepare(SQL)?;
+        let mut stmt = conn.prepare(SQL)?;
         let rows = stmt.query_map(params![conversation_id, since_unix], |r| {
             Ok(LeaderboardRow {
                 user_id: r.get(0)?,
@@ -1551,6 +1583,33 @@ LIMIT 100";
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Per-user gamification leaderboard.
+    ///
+    /// `conversation_id` `None` = across all conversations of `kind='group'`
+    /// (DMs are excluded regardless). `since_unix` `None` = all time.
+    ///
+    /// Points: `messages×1 + likes_received×20 + likes_given×10 − leaves×25
+    /// − kicks×500 − deleted×5`. The source economy also penalises inactive
+    /// months on all-time boards; that penalty is omitted for v1.
+    ///
+    /// Events are resolved from system messages' `raw_json`:
+    /// * **kick**: `membership.*` event, `removed_user` present, `remover_user`
+    ///   present and different from `removed_user`.
+    /// * **leave**: `membership.*` event, `removed_user` present, `remover_user`
+    ///   absent or equal to `removed_user` (a self-removal).
+    /// * **deleted**: `message.deleted` event; `message_id` is resolved to its
+    ///   author via JOIN within the same conversation; unresolvable rows skipped.
+    ///
+    /// GroupMe membership event ids are JSON numbers, not strings. `CAST(…AS TEXT)`
+    /// normalises both forms so they compare correctly against `user_id` TEXT values.
+    pub fn leaderboard(
+        &self,
+        conversation_id: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> Result<Vec<LeaderboardRow>> {
+        Self::leaderboard_on(&self.conn, conversation_id, since_unix)
     }
 }
 
@@ -3607,5 +3666,67 @@ mod tests {
             board_future.is_empty() || !board_future.iter().any(|r| r.user_id == "20000001"),
             "future since_unix must exclude all messages"
         );
+    }
+
+    #[test]
+    fn open_readonly_on_in_memory_store_errors() {
+        let s = Store::open_in_memory().unwrap();
+        let result = s.open_readonly();
+        assert!(
+            result.is_err(),
+            "open_readonly must fail for in-memory stores (no db path)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("in-memory"),
+            "error message must mention in-memory: {msg}"
+        );
+    }
+
+    /// Runs `leaderboard_on` against a read-only side connection opened with
+    /// `open_readonly` and asserts identical results to the locked main path.
+    /// This is the correctness proof that the analytics bypass is safe.
+    #[test]
+    fn leaderboard_side_connection_matches_locked_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+        let mut s = Store::open(&path).unwrap();
+
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                name: Some("Test Group".into()),
+                updated_at: 100,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        s.insert_messages(
+            "10000001",
+            &[
+                msg("170000000000000001", "hello", 1_000_000),
+                msg("170000000000000002", "world", 1_000_001),
+            ],
+        )
+        .unwrap();
+
+        let expected = s.leaderboard(None, None).unwrap();
+
+        // Open a side connection; the locked path must not be held.
+        let side = s.open_readonly().unwrap();
+        let actual = Store::leaderboard_on(&side, None, None).unwrap();
+
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "side connection must return the same row count as the locked path"
+        );
+        if let (Some(e), Some(a)) = (expected.first(), actual.first()) {
+            assert_eq!(e.user_id, a.user_id, "top user_id must match");
+            assert_eq!(e.messages, a.messages, "message count must match");
+            assert_eq!(e.points, a.points, "points must match");
+        }
     }
 }
