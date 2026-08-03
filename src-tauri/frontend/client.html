@@ -622,6 +622,14 @@
     color: var(--fg-soft); font-size: .78rem; line-height: 1.45; background: var(--raised);
   }
   .att-miss svg { width: 17px; height: 17px; flex: none; opacity: .75; }
+  .att-dl {
+    margin-left: auto; flex: none; padding: .18rem .45rem;
+    font-family: var(--font-label); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+    border: 1px solid var(--rule); border-radius: 1px; background: none;
+    color: var(--fg-soft); cursor: pointer; white-space: nowrap;
+  }
+  .att-dl:hover:not(:disabled) { background: var(--accent-soft); color: var(--fg); border-color: var(--accent); }
+  .att-dl:disabled { opacity: .55; cursor: default; }
 
   /* Reactions sit under the passage like margin notes: tracked, unfilled,
      quiet until they are yours. */
@@ -3470,19 +3478,26 @@
         var preview = state.localPreview.get(String(url));
         if (preview) { showImage(slot, preview, "Image you sent"); return; }
 
-        resolveMedia(url).then(function (path) {
-          if (!path || !slot.isConnected) return;
-          if (type === "video") {
-            var v = document.createElement("video");
-            v.className = "att-img";
-            v.controls = true;
-            v.preload = "metadata";
-            v.src = localSrc(path);
-            slot.textContent = "";
-            slot.appendChild(v);
+        var _attUrl = String(url);
+        var _attType = type;
+        resolveMedia(_attUrl).then(function (path) {
+          if (!slot.isConnected) return;
+          if (path) {
+            if (_attType === "video") {
+              var v = document.createElement("video");
+              v.className = "att-img";
+              v.controls = true;
+              v.preload = "metadata";
+              v.src = localSrc(path);
+              slot.textContent = "";
+              slot.appendChild(v);
+              return;
+            }
+            showImage(slot, localSrc(path), "Attached image");
             return;
           }
-          showImage(slot, localSrc(path), "Attached image");
+          // Not in the local cache yet: offer a one-tap download.
+          attachDownloadButton(slot, _attUrl, _attType);
         });
       } else if (type === "location") {
         var name = a.name ? String(a.name) : "Shared location";
@@ -3510,6 +3525,43 @@
     n.appendChild(icon(kind === "pin" ? "pin" : kind === "file" ? "file" : "broken"));
     n.appendChild(el("span", null, label));
     return n;
+  }
+
+  // Appends a Download button to the att-miss placeholder already inside
+  // `slot`. On success the placeholder is replaced by the real media element.
+  // On failure the button re-enables so the user can retry.
+  // Never uses the remote URL — that would be blocked by the CSP and would
+  // point at an expiring signed CDN link anyway.
+  function attachDownloadButton(slot, attUrl, attType) {
+    var miss = slot.querySelector(".att-miss");
+    if (!miss) return;
+    var dlBtn = btn("att-dl", "Download");
+    dlBtn.textContent = "Download";
+    dlBtn.addEventListener("click", function () {
+      dlBtn.disabled = true;
+      dlBtn.textContent = "Downloading…";
+      write("client_sync_media", { url: attUrl }).then(function (p) {
+        if (!slot.isConnected) return;
+        state.mediaCache.set(attUrl, p);
+        if (attType === "video") {
+          var v = document.createElement("video");
+          v.className = "att-img";
+          v.controls = true;
+          v.preload = "metadata";
+          v.src = localSrc(p);
+          slot.textContent = "";
+          slot.appendChild(v);
+          return;
+        }
+        showImage(slot, localSrc(p), "Attached image");
+      }, function () {
+        if (!slot.isConnected) return;
+        dlBtn.disabled = false;
+        dlBtn.textContent = "Couldn’t download — tap to retry";
+        state.mediaCache.delete(attUrl);
+      });
+    });
+    miss.appendChild(dlBtn);
   }
 
   /* ----------------------------- reactions ----------------------------- */

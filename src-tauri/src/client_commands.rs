@@ -20,7 +20,8 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::State;
+use sha2::{Digest, Sha256};
+use tauri::{Manager, State};
 use tokio::sync::RwLock;
 
 use crate::api::{ApiError, GroupMeClient};
@@ -173,6 +174,50 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ------------------------------------------------- on-demand media helpers
+
+/// Produces the same filename as the sync engine's `blob_name`: SHA-256 of the
+/// URL in hex, plus the extension the response content type implies. A manually
+/// downloaded file is therefore indistinguishable from a background-synced one.
+fn media_blob_name(url: &str, content_type: Option<&str>) -> String {
+    let digest = Sha256::digest(url.as_bytes());
+    let mut name = String::with_capacity(digest.len() * 2 + 5);
+    for b in &digest {
+        name.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+        name.push(char::from_digit((b & 0x0f) as u32, 16).unwrap_or('0'));
+    }
+    name.push_str(media_extension_for(content_type));
+    name
+}
+
+fn media_extension_for(content_type: Option<&str>) -> &'static str {
+    let raw = content_type.unwrap_or("");
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "image/jpeg" | "image/jpg" => ".jpg",
+        "image/png" => ".png",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/bmp" => ".bmp",
+        "image/heic" => ".heic",
+        "image/svg+xml" => ".svg",
+        "video/mp4" => ".mp4",
+        "video/quicktime" => ".mov",
+        "video/webm" => ".webm",
+        "audio/mpeg" => ".mp3",
+        "audio/mp4" | "audio/x-m4a" => ".m4a",
+        "audio/ogg" => ".ogg",
+        "application/pdf" => ".pdf",
+        "text/plain" => ".txt",
+        _ => ".bin",
+    }
 }
 
 // ------------------------------------------------------------- pure helpers
@@ -858,6 +903,93 @@ pub async fn client_set_block(
     })
 }
 
+/// Downloads one attachment on demand and returns its LOCAL file path.
+///
+/// The sync engine downloads media in background batches; this command fetches
+/// a single URL immediately so the user gets the file without waiting for the
+/// next sync cycle. On success the asset is recorded in the media cache exactly
+/// as the sync engine would have recorded it — subsequent calls to
+/// `archive_media_path` and the attachment renderer see the same row.
+///
+/// The returned path is the same string stored in `media_cache.local_path`, so
+/// the frontend can pass it straight to `convertFileSrc` / `localSrc`.
+#[tauri::command]
+pub async fn client_sync_media(
+    app: tauri::AppHandle,
+    store: State<'_, SharedStore>,
+    client: State<'_, SharedClient>,
+    url: String,
+) -> CmdResult<String> {
+    if !url.starts_with("https://") {
+        return Err("only https:// attachment URLs are accepted".into());
+    }
+    if url.len() > 2048 {
+        return Err("attachment URL is too long".into());
+    }
+
+    // Fast path: already in the cache — no network needed.
+    {
+        let store_c = store.inner().clone();
+        let url_c = url.clone();
+        let cached = tokio::task::spawn_blocking(move || {
+            let guard = store_c.lock().unwrap_or_else(|e| e.into_inner());
+            guard.get_media(&url_c)
+        })
+        .await
+        .map_err(|e| fail("checking the media cache", e))?
+        .map_err(|e| fail("checking the media cache", format!("{e:#}")))?;
+
+        if let Some(path) = cached {
+            return Ok(path);
+        }
+    }
+
+    // Fetch the bytes.  The guard is dropped immediately after the call so it
+    // is never held across the subsequent blocking I/O.
+    let (bytes, content_type) = {
+        let guard = client.read().await;
+        let Some(api) = guard.as_ref() else {
+            return Err(NOT_SIGNED_IN.into());
+        };
+        api.fetch_bytes(&url)
+            .await
+            .map_err(|e| map_api("downloading the attachment", e))?
+    };
+
+    let media_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| fail("resolving the media directory", e))?
+        .join(crate::MEDIA_DIRNAME);
+
+    // Both the file write and the cache row happen inside one spawn_blocking so
+    // a crash between them cannot leave a row pointing at a missing file, or a
+    // file that will never be found.
+    let store_c = store.inner().clone();
+    let url_c = url.clone();
+    let ct = content_type.clone();
+    let bytes_len = bytes.len() as i64;
+    let now = now_secs();
+    let path = media_dir.join(media_blob_name(&url, content_type.as_deref()));
+
+    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let ps = path.to_string_lossy().to_string();
+        std::fs::write(&path, &bytes).map_err(|e| format!("writing media file: {e}"))?;
+        let mut guard = store_c.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .put_media(&url_c, &ps, ct.as_deref(), bytes_len, now)
+            .map_err(|e| format!("recording media cache entry: {e:#}"))?;
+        Ok(ps)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(p)) => Ok(p),
+        Ok(Err(e)) => Err(fail("downloading the attachment", e)),
+        Err(e) => Err(fail("downloading the attachment", e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,10 +1032,11 @@ mod tests {
             found += 1;
         }
         assert_eq!(
-            found, 18,
-            "expected exactly the eighteen client commands \
+            found, 19,
+            "expected exactly the nineteen client commands \
              (7 message mutations + 2 realtime bridges + 2 ui-preference \
-              + 3 local pin/mute + 3 group-settings/leave/block + 1 priority sync)"
+              + 3 local pin/mute + 3 group-settings/leave/block + 1 priority sync \
+              + 1 on-demand media download)"
         );
     }
 

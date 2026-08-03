@@ -2,6 +2,18 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.10.0] — 2026-08-03
+
+### Added
+
+- **Download attachments on demand.** An attachment the background sync has not
+  cached yet now shows a "Download" button on its placeholder — one click
+  fetches that file immediately and swaps it in, instead of waiting for the
+  budgeted media pass to reach it. Downloads land in the same content-addressed
+  cache the sync uses, so a file fetched by hand is indistinguishable from one
+  fetched in the background. Failures offer a retry and never fall back to the
+  remote URL (GroupMe's CDN links expire).
+
 ## [0.9.0] — 2026-08-03
 
 The archive learns to show off: a leaderboard, group metadata, and jumps that

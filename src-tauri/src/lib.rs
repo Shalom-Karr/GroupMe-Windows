@@ -157,6 +157,7 @@ pub fn run() {
             client_commands::client_leave_group,
             client_commands::client_set_block,
             client_commands::client_sync_now,
+            client_commands::client_sync_media,
             tray::show_app_menu,
             updater::updater_check,
             updater::updater_download,
