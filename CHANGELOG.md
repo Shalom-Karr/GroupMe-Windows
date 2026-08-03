@@ -2,6 +2,32 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.9.0] — 2026-08-03
+
+The archive learns to show off: a leaderboard, group metadata, and jumps that
+never dead-end.
+
+### Added
+
+- **Leaderboard.** A trophy button on any group opens a ranked sheet — podium
+  for the top three, points bars, period tabs (all time / 30 days / 7 days /
+  today), and a this-group / all-groups toggle. Points follow the SKChats
+  economy: messages ×1, likes received ×20, likes given ×10, leaving −25,
+  being removed −500, deleted messages −5 — all computed locally from the
+  archive, including reading kick-vs-left and message-deleted events out of the
+  stored system messages. Click a row for its full breakdown; negative totals
+  collapse under a toggle.
+- **About this group.** Group settings now open with everything the archive
+  knows: created date, first archived message (click to jump to it), latest
+  message, messages archived, how many people ever wrote, active people and
+  messages in the last 30 days, average active people per day, busiest day, and
+  the most prolific member (click for their profile).
+- **Go to first message.** In the date popover and every conversation's menu.
+- **Go-to-date never dead-ends.** A date older than the archive now lands on
+  the oldest archived message with an honest note, instead of a "no messages"
+  toast. (Deep history is also actively backfilling now that the group API is
+  reachable — the archive's edge moves earlier every cycle.)
+
 ## [0.8.0] — 2026-08-03
 
 The client becomes a live messenger: typing indicators, on-demand sync, filters,

@@ -1175,6 +1175,14 @@
     background: var(--accent); color: var(--bg);
   }
   .datepop .dp-go:hover { background: var(--fg); border-color: var(--fg); }
+  .datepop .dp-first {
+    margin-top: .3rem; width: 100%; padding: .32rem .5rem; cursor: pointer;
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase;
+    border: 1px solid var(--rule); border-radius: 1px;
+    background: none; color: var(--fg-soft);
+  }
+  .datepop .dp-first:hover { color: var(--fg); border-color: var(--fg-soft); background: var(--raised); }
 
   /* ---------- conversation settings sheet ----------
      A centered panel, not a page: the group's people and the actions that act
@@ -1302,6 +1310,129 @@
     padding: .8rem 1.1rem; color: var(--fg-soft); font-size: .82rem; line-height: 1.55;
   }
   .sheet-note .spinner { margin: .2rem auto; }
+
+  /* ---------- group stats (about section in settings sheet) ---------- */
+  .grp-stats { padding: .5rem 1.1rem .85rem; }
+  .grp-stat-row {
+    display: flex; align-items: baseline; gap: .7rem;
+    padding: .22rem 0; font-size: .82rem; line-height: 1.5;
+    border-top: 1px solid var(--rule);
+  }
+  .grp-stat-row:first-child { border-top: 0; }
+  .grp-stat-lbl {
+    font-family: var(--font-label); font-size: .56rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft); flex: 0 0 9.5rem;
+  }
+  .grp-stat-val { flex: 1; min-width: 0; }
+  .grp-stat-val button {
+    border: 0; background: none; padding: 0; font: inherit; font-size: .82rem;
+    color: var(--accent); cursor: pointer; text-align: left;
+    border-bottom: 1px solid var(--accent-soft);
+  }
+  .grp-stat-val button:hover { border-bottom-color: var(--accent); }
+
+  /* ---------- leaderboard sheet ---------- */
+  #lbSheet { width: min(44rem, calc(100vw - 2rem)); max-height: min(88vh, 54rem); }
+  .lb-controls {
+    display: flex; flex-wrap: wrap; gap: .4rem 1rem; align-items: center;
+    padding: .55rem 1.1rem; border-bottom: 1px solid var(--rule);
+  }
+  .lb-chips { display: flex; gap: .25rem; }
+  .lb-chip {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: .22rem .55rem; border: 1px solid var(--rule); border-radius: 1px;
+    background: none; color: var(--fg-soft); cursor: pointer;
+  }
+  .lb-chip:hover { color: var(--fg); border-color: var(--fg-soft); }
+  .lb-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); }
+  .lb-tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); border-radius: 1px; overflow: hidden; }
+  .lb-tab {
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em; text-transform: uppercase;
+    padding: .22rem .55rem; border: 0; border-left: 1px solid var(--rule);
+    background: none; color: var(--fg-soft); cursor: pointer;
+  }
+  .lb-tab:first-child { border-left: 0; }
+  .lb-tab:hover { color: var(--fg); background: var(--raised); }
+  .lb-tab.on { background: var(--accent-soft); color: var(--fg); }
+  .lb-state { padding: 1.2rem 1.1rem; color: var(--fg-soft); font-size: .84rem; text-align: center; }
+  .lb-podium {
+    display: flex; justify-content: center; align-items: flex-end; gap: .75rem;
+    padding: 1.2rem 1.1rem .9rem; border-bottom: 1px solid var(--rule);
+  }
+  .lb-place {
+    display: flex; flex-direction: column; align-items: center; gap: .28rem;
+    cursor: pointer; border-radius: 2px; padding: .55rem .75rem; flex: 0 1 9rem;
+    border: 1px solid transparent;
+  }
+  .lb-place:hover { background: var(--raised); border-color: var(--rule); }
+  .lb-place.p1 { order: 2; padding-top: 1rem; }
+  .lb-place.p2 { order: 1; }
+  .lb-place.p3 { order: 3; }
+  .lb-medal { font-size: 1.15rem; line-height: 1; }
+  .lb-place-name {
+    font-family: var(--font-display); font-weight: 600; font-size: .84rem;
+    text-align: center; max-width: 7.5rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lb-place-pts { font-family: var(--font-mono); font-size: 1.05rem; font-weight: 700; }
+  .lb-place.p1 .lb-place-pts { font-size: 1.3rem; color: var(--warn); }
+  .lb-place-sub {
+    font-family: var(--font-label); font-size: .55rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft);
+  }
+  .lb-table { border-top: 1px solid var(--rule); }
+  .lb-row-main {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .38rem 1.1rem; cursor: pointer; position: relative;
+    border-top: 1px solid var(--rule);
+  }
+  .lb-table .lb-row:first-child .lb-row-main { border-top: 0; }
+  .lb-row-main:hover { background: var(--raised); }
+  .lb-rank {
+    font-family: var(--font-mono); font-size: .66rem; color: var(--fg-soft);
+    flex: 0 0 1.6rem; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .lb-rank.gold { color: var(--warn); font-weight: 700; }
+  .lb-rank.silver { font-weight: 600; }
+  .lb-rank.bronze { opacity: .75; font-weight: 600; }
+  .lb-name {
+    min-width: 0; flex: 1; font-family: var(--font-display); font-size: .88rem;
+    font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lb-pts {
+    font-family: var(--font-mono); font-size: .82rem; font-weight: 700;
+    flex: 0 0 4rem; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .lb-msgs {
+    font-family: var(--font-label); font-size: .56rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--fg-soft);
+    flex: 0 0 3.5rem; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .lb-likes {
+    font-family: var(--font-label); font-size: .56rem; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--fg-soft);
+    flex: 0 0 2.8rem; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .lb-bar-wrap { position: absolute; bottom: 0; left: 3.4rem; right: 0; height: 2px; }
+  .lb-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+    opacity: .45;
+  }
+  .lb-expand {
+    display: none; padding: .4rem 1.1rem .5rem 5.4rem;
+    background: var(--raised); border-top: 1px solid var(--rule);
+    font-size: .77rem; line-height: 1.65; color: var(--fg-soft);
+    -webkit-user-select: text; user-select: text;
+  }
+  .lb-row.open .lb-expand { display: block; }
+  .lb-neg-toggle {
+    display: block; width: 100%; padding: .5rem 1.1rem; text-align: left;
+    border: 0; border-top: 2px solid var(--rule); background: none;
+    font-family: var(--font-label); font-size: .58rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--fg-soft); cursor: pointer;
+  }
+  .lb-neg-toggle:hover { color: var(--fg); background: var(--raised); }
 </style>
 
 <!--
@@ -1334,6 +1465,7 @@
   <svg id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
   <svg id="i-sync" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.4-2.6L3 16"/><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.4 2.6L21 8"/><path d="M3 21v-5h5"/><path d="M21 3v5h-5"/></svg>
   <svg id="i-chevron-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+  <svg id="i-trophy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v8a6 6 0 0 1-12 0V3z"/><path d="M6 7H3a3 3 0 0 0 3 3"/><path d="M18 7h3a3 3 0 0 1-3 3"/><path d="M9 21h6M12 17v4"/></svg>
 </div>
 
 <div class="app" id="app">
@@ -1395,6 +1527,7 @@
             <button class="hbtn" id="toFind" type="button" title="Search this conversation" aria-label="Search within this conversation"></button>
             <button class="hbtn" id="toDate" type="button" title="Jump to a date" aria-label="Jump to a date"></button>
             <button class="hbtn" id="toLatest" type="button" title="Jump to latest" aria-label="Jump to the newest message"></button>
+            <button class="hbtn" id="toTrophy" type="button" title="Leaderboard" aria-label="Leaderboard" style="display:none"></button>
             <button class="hbtn" id="toSettings" type="button" title="Conversation settings" aria-label="Conversation settings"></button>
           </div>
         </div>
@@ -1469,6 +1602,7 @@
 <div class="pop stats-pop" id="statsPop" role="dialog" aria-label="Archive stats"></div>
 <div class="sheet" id="convSheet" role="dialog" aria-modal="true" aria-label="Conversation settings"></div>
 <div class="sheet" id="profileCard" role="dialog" aria-modal="true" aria-label="User profile"></div>
+<div class="sheet" id="lbSheet" role="dialog" aria-modal="true" aria-label="Leaderboard"></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -2075,6 +2209,7 @@
 
   var groupDetailCache = Object.create(null); // cid -> group object incl. members
   var pastMembersCache = Object.create(null); // cid -> array of past members, or null
+  var groupStatsCache = Object.create(null);  // cid -> stats object, null=loading, {__failed}=error
   var blockedUsers = Object.create(null);     // user id string -> true (optimistic)
 
   // Sidebar filter state, persisted in localStorage.
@@ -3547,6 +3682,7 @@
     av.appendChild(makeAvatar(convoTitle(c), c && fld(c, "image_url", "imageUrl"), cid,
       "hd" + (kind === "group" ? " square" : "")));
     $("headId").setAttribute("aria-label", "Settings for " + (convoTitle(c) || "this conversation"));
+    $("toTrophy").style.display = kind === "group" ? "" : "none";
     closeFind();
     updateSub();
     clearThreadDom();
@@ -4189,6 +4325,7 @@
   var scrim = $("scrim"), emojiPop = $("emojiPop"), menuPop = $("menuPop");
   var datePop = $("datePop"), convSheet = $("convSheet"), profileCard = $("profileCard");
   var statsPop = $("statsPop");
+  var lbSheet = $("lbSheet");
 
   function closePops() {
     emojiPop.classList.remove("show");
@@ -4197,6 +4334,7 @@
     statsPop.classList.remove("show");
     convSheet.classList.remove("show");
     profileCard.classList.remove("show");
+    lbSheet.classList.remove("show");
     scrim.classList.remove("show");
   }
 
@@ -4616,6 +4754,13 @@
     menuPop.appendChild(menuItem(muted ? "Unmute" : "Mute", muted ? "bell" : "bell-off", function () { toggleMute(c); }));
     menuPop.appendChild(menuItem("Sync now", "sync", function () { doSyncNow(String(c.id), c.kind || "group", null); }));
     menuPop.appendChild(menuItem("Settings…", "cog", function () { openConvSettings(String(c.id)); }));
+    menuPop.appendChild(menuItem("Go to first message", "up", function () {
+      var cid = String(c.id);
+      call("archive_first_message", { conversationId: cid }).then(function (firstId) {
+        if (firstId != null) openConversation(cid, String(firstId));
+        else toast("No messages archived for this conversation.");
+      });
+    }));
 
     menuPop.appendChild(document.createElement("hr"));
     if (c.kind === "group") {
@@ -4675,6 +4820,7 @@
     scrim.classList.add("show");
     if (c.kind === "group" && !groupDetailCache[sheetCid]) loadGroupDetail(sheetCid);
     if (c.kind === "group" && !(String(sheetCid) in pastMembersCache)) loadPastMembers(sheetCid);
+    if (c.kind === "group") loadGroupStats(sheetCid);
   }
 
   function loadGroupDetail(cid) {
@@ -4757,6 +4903,7 @@
     if (sheetConfirmMode) body.appendChild(buildSheetConfirm(c));
 
     if (isGroup) {
+      body.appendChild(buildGroupStats(sheetCid));
       body.appendChild(buildMembers(c));
       body.appendChild(buildPastMembers(c));
     } else {
@@ -4942,6 +5089,371 @@
     return wrap;
   }
 
+  /* ===================== group stats (about section) ==================== */
+
+  function loadGroupStats(cid) {
+    if (groupStatsCache[String(cid)] !== undefined) return;
+    groupStatsCache[String(cid)] = null; // loading sentinel
+    call("archive_group_stats", { conversationId: String(cid) }).then(function (stats) {
+      groupStatsCache[String(cid)] = stats || { __failed: true };
+      if (sheetCid === String(cid) && convSheet.classList.contains("show")) renderSheet();
+    });
+  }
+
+  function buildGroupStats(cid) {
+    var wrap = document.createDocumentFragment();
+    var stats = groupStatsCache[String(cid)];
+
+    var sec = el("div", "sheet-sec", "About this group");
+    wrap.appendChild(sec);
+
+    if (stats === null) {
+      // loading sentinel present — show spinner
+      var noteLoad = el("div", "grp-stats");
+      var sp = el("div", "spinner");
+      sp.setAttribute("role", "status");
+      sp.setAttribute("aria-label", "Loading group info");
+      noteLoad.appendChild(sp);
+      wrap.appendChild(noteLoad);
+      return wrap;
+    }
+    if (!stats || stats.__failed) return wrap; // silent skip on failure
+
+    var grid = el("div", "grp-stats");
+
+    function statRow(label, value) {
+      // value may be a string or a DOM node
+      var row = el("div", "grp-stat-row");
+      row.appendChild(el("span", "grp-stat-lbl", label));
+      var valEl = el("span", "grp-stat-val");
+      if (value && typeof value === "object" && value.nodeType) {
+        valEl.appendChild(value);
+      } else {
+        valEl.textContent = String(value == null ? "" : value);
+      }
+      row.appendChild(valEl);
+      grid.appendChild(row);
+    }
+
+    var createdAt = fld(stats, "created_at");
+    if (createdAt) {
+      var cd = toDate(createdAt);
+      if (cd) {
+        statRow("Group created",
+          relTime(createdAt) + " · " + MONTHS[cd.getMonth()] + " " + cd.getDate() + ", " + cd.getFullYear());
+      }
+    }
+
+    var firstMsgId = fld(stats, "first_message_id");
+    var firstMsgAt = fld(stats, "first_message_at");
+    var firstMsgName = fld(stats, "first_message_name");
+    if (firstMsgId && firstMsgAt) {
+      var fd = toDate(firstMsgAt);
+      var fLabel = fd
+        ? (MONTHS[fd.getMonth()] + " " + fd.getDate() + ", " + fd.getFullYear())
+        : relTime(firstMsgAt);
+      if (firstMsgName) fLabel += " by " + firstMsgName;
+      var fBtn = el("button");
+      fBtn.type = "button";
+      fBtn.textContent = fLabel;
+      (function (fid) {
+        fBtn.addEventListener("click", function () {
+          closePops();
+          openConversation(String(cid), String(fid));
+        });
+      })(firstMsgId);
+      statRow("First archived message", fBtn);
+    }
+
+    var lastMsgAt = fld(stats, "last_message_at");
+    if (lastMsgAt) statRow("Latest message", relTime(lastMsgAt));
+
+    var msgCount = fld(stats, "message_count");
+    if (msgCount != null && Number(msgCount) > 0) {
+      statRow("Messages archived", Number(msgCount).toLocaleString());
+    }
+
+    var senders = fld(stats, "distinct_senders");
+    if (senders != null && Number(senders) > 0) {
+      statRow("People who ever wrote", String(Number(senders)));
+    }
+
+    var active30 = fld(stats, "active_last_30d");
+    var msgs30 = fld(stats, "messages_last_30d");
+    if (active30 != null || msgs30 != null) {
+      var bits30 = [];
+      if (active30 != null) bits30.push(Number(active30) + " people");
+      if (msgs30 != null) bits30.push(Number(msgs30).toLocaleString() + " messages");
+      if (bits30.length) statRow("Active in the last 30 days", bits30.join(" · "));
+    }
+
+    var avg30 = fld(stats, "avg_active_per_day_30d");
+    if (avg30 != null && Number(avg30) > 0) {
+      statRow("Avg active people / day (30d)", Number(avg30).toFixed(1));
+    }
+
+    var busiestDay = fld(stats, "busiest_day_unix");
+    var busiestCount = fld(stats, "busiest_day_count");
+    if (busiestDay) {
+      var bd = toDate(busiestDay);
+      var bLabel = bd
+        ? (MONTHS[bd.getMonth()] + " " + bd.getDate() + ", " + bd.getFullYear())
+        : "";
+      if (busiestCount != null) bLabel += (bLabel ? " · " : "") + Number(busiestCount).toLocaleString() + " messages";
+      if (bLabel) statRow("Busiest day", bLabel);
+    }
+
+    var topUid = fld(stats, "top_sender_user_id");
+    var topName = fld(stats, "top_sender_name");
+    var topCount = fld(stats, "top_sender_count");
+    if (topName && topCount != null) {
+      var topText = topName + " (" + Number(topCount).toLocaleString() + ")";
+      if (topUid) {
+        var topBtn = el("button");
+        topBtn.type = "button";
+        topBtn.textContent = topText;
+        (function (uid, nm) {
+          topBtn.addEventListener("click", function () {
+            closePops();
+            openProfile(String(uid), nm);
+          });
+        })(topUid, topName);
+        statRow("Most messages", topBtn);
+      } else {
+        statRow("Most messages", topText);
+      }
+    }
+
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
+  /* ===================== leaderboard sheet ============================== */
+
+  var lbSheetCid = null;   // cid of the group that opened the leaderboard
+  var lbScopeAll = false;  // true = all groups, false = this group
+  var lbPeriod = 0;        // 0=all time, 1=30d, 2=7d, 3=today
+  var lbCache = Object.create(null); // "scope:period" -> rows array | null (loading)
+
+  function lbCacheKey(scopeAll, period) {
+    return (scopeAll ? "all" : "grp") + ":" + period;
+  }
+
+  function lbSinceUnix(period) {
+    var now = Math.floor(Date.now() / 1000);
+    if (period === 1) return now - 30 * 86400;
+    if (period === 2) return now - 7 * 86400;
+    if (period === 3) {
+      var d = new Date();
+      return Math.floor(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000);
+    }
+    return null;
+  }
+
+  function openLeaderboard(cid) {
+    closePops();
+    lbSheetCid = String(cid);
+    lbScopeAll = false;
+    lbPeriod = 0;
+    lbCache = Object.create(null);
+    renderLbSheet();
+    lbSheet.classList.add("show");
+    scrim.classList.add("show");
+    fetchLbData();
+  }
+
+  function renderLbSheet() {
+    var c = lbSheetCid ? state.byId[lbSheetCid] : null;
+    lbSheet.textContent = "";
+
+    var head = el("div", "sheet-head");
+    var ht = el("div", "sheet-headtext");
+    ht.appendChild(el("div", "sheet-title", "Leaderboard"));
+    if (c) ht.appendChild(el("div", "sheet-sub", convoTitle(c)));
+    head.appendChild(ht);
+    var x = btn("sheet-x", "Close", closePops);
+    x.appendChild(icon("x"));
+    head.appendChild(x);
+    lbSheet.appendChild(head);
+
+    var ctrl = el("div", "lb-controls");
+
+    var scopeChips = el("div", "lb-chips");
+    var chipThis = el("button", "lb-chip" + (!lbScopeAll ? " on" : ""), "This group");
+    chipThis.type = "button";
+    chipThis.addEventListener("click", function () {
+      if (!lbScopeAll) return;
+      lbScopeAll = false;
+      renderLbSheet();
+      fetchLbData();
+    });
+    var chipAll = el("button", "lb-chip" + (lbScopeAll ? " on" : ""), "All groups");
+    chipAll.type = "button";
+    chipAll.addEventListener("click", function () {
+      if (lbScopeAll) return;
+      lbScopeAll = true;
+      renderLbSheet();
+      fetchLbData();
+    });
+    scopeChips.appendChild(chipThis);
+    scopeChips.appendChild(chipAll);
+    ctrl.appendChild(scopeChips);
+
+    var periods = ["All time", "30 days", "7 days", "Today"];
+    var tabs = el("div", "lb-tabs");
+    periods.forEach(function (label, i) {
+      var t = el("button", "lb-tab" + (lbPeriod === i ? " on" : ""), label);
+      t.type = "button";
+      (function (pi) {
+        t.addEventListener("click", function () {
+          if (lbPeriod === pi) return;
+          lbPeriod = pi;
+          renderLbSheet();
+          fetchLbData();
+        });
+      })(i);
+      tabs.appendChild(t);
+    });
+    ctrl.appendChild(tabs);
+    lbSheet.appendChild(ctrl);
+
+    var body = el("div", "sheet-body");
+    body.id = "lbBody";
+    var key = lbCacheKey(lbScopeAll, lbPeriod);
+    var rows = lbCache[key];
+    if (rows === undefined || rows === null) {
+      body.appendChild(el("div", "lb-state", "Computing…"));
+    } else if (!rows.length) {
+      body.appendChild(el("div", "lb-state", "No data yet."));
+    } else {
+      renderLbData(body, rows);
+    }
+    lbSheet.appendChild(body);
+  }
+
+  function fetchLbData() {
+    var key = lbCacheKey(lbScopeAll, lbPeriod);
+    if (key in lbCache) return; // already cached or loading
+    lbCache[key] = null; // loading sentinel
+    var convId = lbScopeAll ? null : lbSheetCid;
+    var since = lbSinceUnix(lbPeriod);
+    var capturedKey = key;
+    call("archive_leaderboard", { conversationId: convId, sinceUnix: since }).then(function (rows) {
+      lbCache[capturedKey] = Array.isArray(rows) ? rows : [];
+      // Re-render only if this key is still what the open sheet is showing
+      if (lbSheet.classList.contains("show") && lbCacheKey(lbScopeAll, lbPeriod) === capturedKey) {
+        renderLbSheet();
+      }
+    });
+  }
+
+  function renderLbData(body, rows) {
+    var pos = rows.filter(function (r) { return Number(r.points) >= 0; });
+    var neg = rows.filter(function (r) { return Number(r.points) < 0; });
+    var topPts = pos.length ? Math.max(1, Number(pos[0].points)) : 1;
+
+    // Podium: top 3 (visual order: silver left, gold center, bronze right)
+    if (pos.length >= 1) {
+      var podium = el("div", "lb-podium");
+      var podiumDefs = [
+        { r: pos[1], rank: 2, pClass: "lb-place p2", medal: "🥈" },
+        { r: pos[0], rank: 1, pClass: "lb-place p1", medal: "🥇" },
+        { r: pos[2], rank: 3, pClass: "lb-place p3", medal: "🥉" }
+      ];
+      podiumDefs.forEach(function (def) {
+        if (!def.r) return;
+        var place = el("div", def.pClass);
+        place.appendChild(makeAvatar(def.r.name, def.r.avatar_url, def.r.user_id, "sm", def.r.user_id));
+        place.appendChild(el("div", "lb-medal", def.medal));
+        place.appendChild(el("div", "lb-place-name", def.r.name));
+        place.appendChild(el("div", "lb-place-pts", Number(def.r.points).toLocaleString()));
+        var sub = Number(def.r.messages).toLocaleString() + " msgs · ♥ " + Number(def.r.likes_received).toLocaleString();
+        place.appendChild(el("div", "lb-place-sub", sub));
+        (function (uid, nm) {
+          place.addEventListener("click", function () { closePops(); openProfile(String(uid), nm); });
+        })(def.r.user_id, def.r.name);
+        podium.appendChild(place);
+      });
+      body.appendChild(podium);
+    }
+
+    // Table: ranks 4+
+    if (pos.length > 3) {
+      var table = el("div", "lb-table");
+      pos.slice(3).forEach(function (r, i) {
+        appendLbRow(table, r, i + 4, topPts, false);
+      });
+      body.appendChild(table);
+    }
+
+    // Negative-points members, collapsed by default
+    if (neg.length) {
+      var negToggle = el("button", "lb-neg-toggle");
+      negToggle.type = "button";
+      var negShown = false;
+      var negTable = el("div", "lb-table");
+      negTable.style.display = "none";
+      neg.forEach(function (r, i) {
+        appendLbRow(negTable, r, pos.length + i + 1, topPts, true);
+      });
+      function setNegLabel() {
+        negToggle.textContent = neg.length + (neg.length === 1 ? " member" : " members") +
+          " below zero — " + (negShown ? "hide" : "show");
+      }
+      setNegLabel();
+      negToggle.addEventListener("click", function () {
+        negShown = !negShown;
+        negTable.style.display = negShown ? "" : "none";
+        setNegLabel();
+      });
+      body.appendChild(negToggle);
+      body.appendChild(negTable);
+    }
+  }
+
+  function appendLbRow(table, r, rank, topPts, isNeg) {
+    var row = el("div", "lb-row");
+
+    var main = el("div", "lb-row-main");
+    var rankCls = "lb-rank" + (rank === 1 ? " gold" : (rank === 2 ? " silver" : (rank === 3 ? " bronze" : "")));
+    main.appendChild(el("span", rankCls, String(rank)));
+    main.appendChild(makeAvatar(r.name, r.avatar_url, r.user_id, "sm", r.user_id));
+    main.appendChild(el("span", "lb-name", r.name));
+    main.appendChild(el("span", "lb-pts", Number(r.points).toLocaleString()));
+    main.appendChild(el("span", "lb-msgs", Number(r.messages).toLocaleString() + " msg"));
+    main.appendChild(el("span", "lb-likes", "♥ " + Number(r.likes_received).toLocaleString()));
+
+    if (!isNeg && topPts > 0) {
+      var pct = Math.max(0, Math.min(100, (Number(r.points) / topPts) * 100));
+      var barWrap = el("div", "lb-bar-wrap");
+      var bar = el("div", "lb-bar");
+      bar.style.width = pct + "%";
+      barWrap.appendChild(bar);
+      main.appendChild(barWrap);
+    }
+
+    // Breakdown expand/collapse on row click
+    var expand = el("div", "lb-expand");
+    var terms = [];
+    if (r.messages) terms.push(Number(r.messages).toLocaleString() + " messages ×1");
+    if (r.likes_received) terms.push(Number(r.likes_received).toLocaleString() + " likes received ×20");
+    if (r.likes_given) terms.push(Number(r.likes_given).toLocaleString() + " likes given ×10");
+    if (r.leaves) terms.push(Number(r.leaves).toLocaleString() + " leaves ×−25");
+    if (r.kicks) terms.push(Number(r.kicks).toLocaleString() + " kicks ×−500");
+    if (r.deleted) terms.push(Number(r.deleted).toLocaleString() + " deleted ×−5");
+    terms.push("= " + Number(r.points).toLocaleString() + " points");
+    expand.textContent = terms.join(" · ");
+
+    main.addEventListener("click", function (e) {
+      if (e.target.classList.contains("clickable") || (e.target.closest && e.target.closest(".clickable"))) return;
+      row.classList.toggle("open");
+    });
+
+    row.appendChild(main);
+    row.appendChild(expand);
+    table.appendChild(row);
+  }
+
   /* ===================== in-conversation find ===========================
      Keyword search scoped to the open thread via `archive_search` with a
      conversation id. Results jump to the message in its transcript context. */
@@ -5077,6 +5589,18 @@
     go.type = "button";
     go.addEventListener("click", jumpToDate);
     datePop.appendChild(go);
+    var dpFirst = el("button", "dp-first", "⇤ First message");
+    dpFirst.type = "button";
+    dpFirst.addEventListener("click", function () {
+      if (!state.active) { closePops(); return; }
+      var cid = state.active;
+      closePops();
+      call("archive_first_message", { conversationId: cid }).then(function (firstId) {
+        if (firstId != null) openConversation(cid, String(firstId));
+        else toast("No messages archived for this conversation.");
+      });
+    });
+    datePop.appendChild(dpFirst);
     datePickEl.addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); jumpToDate(); }
     });
@@ -5099,7 +5623,16 @@
     var cid = state.active;
     closePops();
     var mid = await call("archive_message_near_date", { conversationId: cid, beforeUnix: beforeUnix });
-    if (mid == null) { toast("No messages on or before that date."); return; }
+    if (mid == null) {
+      var firstId = await call("archive_first_message", { conversationId: cid });
+      if (firstId != null) {
+        toast("Nothing archived that far back — showing the oldest archived message.");
+        openConversation(cid, String(firstId));
+      } else {
+        toast("No messages on or before that date.");
+      }
+      return;
+    }
     openConversation(cid, String(mid));
   }
 
@@ -5394,6 +5927,7 @@
   $("toFind").appendChild(icon("search"));
   $("toDate").appendChild(icon("calendar"));
   $("toLatest").appendChild(icon("jump"));
+  $("toTrophy").appendChild(icon("trophy"));
   $("toSettings").appendChild(icon("cog"));
   $("findPrev").appendChild(icon("up"));
   $("findNext").appendChild(icon("caret"));
@@ -5462,6 +5996,10 @@
   }, { passive: true });
 
   $("back").addEventListener("click", function () { app.classList.remove("thread-open"); });
+
+  $("toTrophy").addEventListener("click", function () {
+    if (state.active && state.activeKind === "group") openLeaderboard(state.active);
+  });
 
   $("toLatest").addEventListener("click", function () {
     if (state.anchored && state.active) openConversation(state.active);
@@ -5565,7 +6103,7 @@
     if (e.key === "Escape") {
       if (emojiPop.classList.contains("show") || menuPop.classList.contains("show") ||
           datePop.classList.contains("show") || convSheet.classList.contains("show") ||
-          profileCard.classList.contains("show")) { closePops(); return; }
+          profileCard.classList.contains("show") || lbSheet.classList.contains("show")) { closePops(); return; }
       if (findbarEl.classList.contains("show")) { closeFind(); return; }
       if (bannerEl.classList.contains("show")) { showBanner(null); return; }
       if (qEl.value) { clearSearch(); qEl.blur(); }

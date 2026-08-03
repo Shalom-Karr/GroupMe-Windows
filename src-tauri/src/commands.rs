@@ -228,6 +228,49 @@ pub async fn archive_past_members(
     .await
 }
 
+/// The id of the oldest archived message in a conversation (by `id_sort`).
+/// Returns `null` when no messages are archived for the conversation. Useful
+/// as a sentinel to know whether a "load oldest" action would do anything.
+#[tauri::command]
+pub async fn archive_first_message(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+) -> CmdResult<Option<String>> {
+    read_store(store.inner(), "loading first message id", move |s| {
+        s.first_message_id(&conversation_id)
+    })
+    .await
+}
+
+/// Conversation-level statistics for a group info panel: message counts,
+/// active-sender counts, busiest day, top sender, and 30-day window metrics.
+#[tauri::command]
+pub async fn archive_group_stats(
+    store: State<'_, SharedStore>,
+    conversation_id: String,
+) -> CmdResult<crate::store::GroupStatsData> {
+    read_store(store.inner(), "loading group stats", move |s| {
+        s.group_stats(&conversation_id)
+    })
+    .await
+}
+
+/// Per-user gamification leaderboard. `conversationId` `null` spans all groups
+/// (DMs excluded). `sinceUnix` `null` covers all time. Sorted by points
+/// descending, capped at 100 rows. Negative-point rows are included — the
+/// frontend decides whether to display them.
+#[tauri::command]
+pub async fn archive_leaderboard(
+    store: State<'_, SharedStore>,
+    conversation_id: Option<String>,
+    since_unix: Option<i64>,
+) -> CmdResult<Vec<crate::store::LeaderboardRow>> {
+    read_store(store.inner(), "loading leaderboard", move |s| {
+        s.leaderboard(conversation_id.as_deref(), since_unix)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,7 +328,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 8, "expected exactly the eight archive readers");
+        assert_eq!(found, 11, "expected exactly the eleven archive readers");
     }
 
     #[test]

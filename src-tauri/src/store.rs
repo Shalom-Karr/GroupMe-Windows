@@ -1224,6 +1224,334 @@ impl Store {
         }
         Ok(out)
     }
+
+    // ------------------------------------------------- analytics / stats
+
+    /// The id of the chronologically oldest message in a conversation (by
+    /// `id_sort`, which carries the same value as `id` parsed to i64). Returns
+    /// `None` when the conversation has no messages archived.
+    pub fn first_message_id(&self, conversation_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id_sort ASC LIMIT 1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Conversation-level stats for the group info panel.
+    ///
+    /// All sender-based counts exclude `system=1` rows. The 30-day window is
+    /// always relative to the moment of the call via `now_unix()`.
+    /// `avg_active_per_day_30d` sums `COUNT(DISTINCT user_id)` per calendar
+    /// day (UTC midnight bucketing via `created_at / 86400`) across the last 30
+    /// days and divides by 30.0 — days with zero activity count as zero, so the
+    /// denominator is always exactly 30.
+    pub fn group_stats(&self, conversation_id: &str) -> Result<GroupStatsData> {
+        let created_at: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT CASE WHEN created_at = 0 THEN NULL ELSE created_at END
+                 FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        let message_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |r| r.get(0),
+        )?;
+
+        let first = self
+            .conn
+            .query_row(
+                "SELECT id, created_at, name FROM messages
+                 WHERE conversation_id = ?1 ORDER BY id_sort ASC LIMIT 1",
+                params![conversation_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let last = self
+            .conn
+            .query_row(
+                "SELECT id, created_at FROM messages
+                 WHERE conversation_id = ?1 ORDER BY id_sort DESC LIMIT 1",
+                params![conversation_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+
+        let distinct_senders: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT user_id) FROM messages
+             WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL",
+            params![conversation_id],
+            |r| r.get(0),
+        )?;
+
+        let cutoff = now_unix() - 30 * 86400;
+
+        let active_last_30d: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT user_id) FROM messages
+             WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL
+               AND created_at >= ?2",
+            params![conversation_id, cutoff],
+            |r| r.get(0),
+        )?;
+
+        let messages_last_30d: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND created_at >= ?2",
+            params![conversation_id, cutoff],
+            |r| r.get(0),
+        )?;
+
+        // Sum COUNT(DISTINCT user_id) per UTC calendar day over the 30d window,
+        // then divide by 30. Days with no messages are absent from the inner
+        // result and contribute 0 to the sum — exact denominator.
+        let daily_distinct_sum: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(cnt), 0) FROM (
+                     SELECT COUNT(DISTINCT user_id) AS cnt
+                     FROM messages
+                     WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL
+                       AND created_at >= ?2
+                     GROUP BY created_at / 86400
+                 ) sub",
+            params![conversation_id, cutoff],
+            |r| r.get(0),
+        )?;
+        let avg_active_per_day_30d = daily_distinct_sum as f64 / 30.0;
+
+        // `created_at / 86400 * 86400` is UTC midnight bucketing: integer
+        // division truncates to the day boundary, multiply restores the unix
+        // timestamp of that midnight.
+        let busiest = self
+            .conn
+            .query_row(
+                "SELECT created_at / 86400 * 86400, COUNT(*) AS cnt
+                 FROM messages WHERE conversation_id = ?1
+                 GROUP BY created_at / 86400
+                 ORDER BY cnt DESC LIMIT 1",
+                params![conversation_id],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+
+        let top = self
+            .conn
+            .query_row(
+                "SELECT user_id, name, COUNT(*) AS cnt
+                 FROM messages
+                 WHERE conversation_id = ?1 AND system = 0 AND user_id IS NOT NULL
+                 GROUP BY user_id ORDER BY cnt DESC LIMIT 1",
+                params![conversation_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        Ok(GroupStatsData {
+            conversation_id: conversation_id.to_string(),
+            created_at,
+            message_count,
+            first_message_id: first.as_ref().map(|(id, _, _)| id.clone()),
+            first_message_at: first.as_ref().and_then(|(_, t, _)| *t),
+            first_message_name: first.as_ref().and_then(|(_, _, n)| n.clone()),
+            last_message_id: last.as_ref().map(|(id, _)| id.clone()),
+            last_message_at: last.as_ref().and_then(|(_, t)| *t),
+            distinct_senders,
+            active_last_30d,
+            messages_last_30d,
+            avg_active_per_day_30d,
+            busiest_day_unix: busiest.as_ref().and_then(|(d, _)| *d),
+            busiest_day_count: busiest.as_ref().map(|(_, c)| *c).unwrap_or(0),
+            top_sender_user_id: top.as_ref().map(|(id, _, _)| id.clone()),
+            top_sender_name: top.as_ref().and_then(|(_, n, _)| n.clone()),
+            top_sender_count: top.as_ref().map(|(_, _, c)| *c).unwrap_or(0),
+        })
+    }
+
+    /// Per-user gamification leaderboard.
+    ///
+    /// `conversation_id` `None` = across all conversations of `kind='group'`
+    /// (DMs are excluded regardless). `since_unix` `None` = all time.
+    ///
+    /// Points: `messages×1 + likes_received×20 + likes_given×10 − leaves×25
+    /// − kicks×500 − deleted×5`. The source economy also penalises inactive
+    /// months on all-time boards; that penalty is omitted for v1.
+    ///
+    /// Events are resolved from system messages' `raw_json`:
+    /// * **kick**: `membership.*` event, `removed_user` present, `remover_user`
+    ///   present and different from `removed_user`.
+    /// * **leave**: `membership.*` event, `removed_user` present, `remover_user`
+    ///   absent or equal to `removed_user` (a self-removal).
+    /// * **deleted**: `message.deleted` event; `message_id` is resolved to its
+    ///   author via JOIN within the same conversation; unresolvable rows skipped.
+    ///
+    /// GroupMe membership event ids are JSON numbers, not strings. `CAST(…AS TEXT)`
+    /// normalises both forms so they compare correctly against `user_id` TEXT values.
+    pub fn leaderboard(
+        &self,
+        conversation_id: Option<&str>,
+        since_unix: Option<i64>,
+    ) -> Result<Vec<LeaderboardRow>> {
+        const SQL: &str = "
+WITH
+  base_msgs AS (
+    SELECT m.id, m.id_sort, m.user_id, m.name, m.avatar_url,
+           m.created_at, m.favorited_by_json, m.conversation_id
+    FROM messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE m.system = 0
+      AND m.user_id IS NOT NULL
+      AND (m.sender_type IS NULL OR m.sender_type NOT IN ('system', 'bot'))
+      AND ((?1 IS NULL AND c.kind = 'group') OR m.conversation_id = ?1)
+      AND (?2 IS NULL OR m.created_at >= ?2)
+  ),
+  user_msgs AS (
+    SELECT user_id,
+           COUNT(*) AS messages,
+           COALESCE(SUM(
+             CASE WHEN favorited_by_json IS NULL
+                       OR favorited_by_json = ''
+                       OR favorited_by_json = '[]'
+                  THEN 0
+                  ELSE json_array_length(favorited_by_json) END
+           ), 0) AS likes_received,
+           MIN(created_at) AS first_at,
+           MAX(created_at) AS last_at
+    FROM base_msgs
+    GROUP BY user_id
+  ),
+  user_latest AS (
+    SELECT user_id, name, avatar_url,
+           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id_sort DESC) AS rn
+    FROM base_msgs
+  ),
+  likes_given AS (
+    SELECT CAST(je.value AS TEXT) AS user_id, COUNT(*) AS cnt
+    FROM (
+      SELECT favorited_by_json
+      FROM base_msgs
+      WHERE favorited_by_json IS NOT NULL
+        AND favorited_by_json != '[]'
+        AND favorited_by_json != ''
+    ) AS fm, json_each(fm.favorited_by_json) je
+    GROUP BY CAST(je.value AS TEXT)
+  ),
+  sys_msgs AS (
+    SELECT m.raw_json, m.conversation_id
+    FROM messages m
+    JOIN conversations c ON c.id = m.conversation_id
+    WHERE m.system = 1
+      AND ((?1 IS NULL AND c.kind = 'group') OR m.conversation_id = ?1)
+      AND (?2 IS NULL OR m.created_at >= ?2)
+  ),
+  kicks AS (
+    SELECT CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) AS user_id,
+           COUNT(*) AS cnt
+    FROM sys_msgs
+    WHERE json_extract(raw_json, '$.event.type') LIKE 'membership%'
+      AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+      AND json_extract(raw_json, '$.event.data.remover_user.id') IS NOT NULL
+      AND CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) !=
+          CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+    GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)
+  ),
+  leaves AS (
+    SELECT CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) AS user_id,
+           COUNT(*) AS cnt
+    FROM sys_msgs
+    WHERE json_extract(raw_json, '$.event.type') LIKE 'membership%'
+      AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+      AND (
+        json_extract(raw_json, '$.event.data.remover_user.id') IS NULL
+        OR CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) =
+           CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+      )
+    GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)
+  ),
+  deleted AS (
+    SELECT m.user_id, COUNT(*) AS cnt
+    FROM sys_msgs sm
+    JOIN messages m
+      ON m.id = CAST(json_extract(sm.raw_json, '$.event.data.message_id') AS TEXT)
+     AND m.conversation_id = sm.conversation_id
+    WHERE json_extract(sm.raw_json, '$.event.type') = 'message.deleted'
+      AND m.user_id IS NOT NULL
+    GROUP BY m.user_id
+  ),
+  all_users AS (
+    SELECT user_id FROM user_msgs
+    UNION SELECT user_id FROM likes_given
+    UNION SELECT user_id FROM kicks
+    UNION SELECT user_id FROM leaves
+    UNION SELECT user_id FROM deleted
+  )
+SELECT
+  au.user_id,
+  COALESCE(ul.name, u.name)             AS name,
+  COALESCE(ul.avatar_url, u.avatar_url) AS avatar_url,
+  COALESCE(um.messages, 0)              AS messages,
+  COALESCE(um.likes_received, 0)        AS likes_received,
+  COALESCE(lg.cnt, 0)                   AS likes_given,
+  COALESCE(lv.cnt, 0)                   AS leaves,
+  COALESCE(k.cnt, 0)                    AS kicks,
+  COALESCE(d.cnt, 0)                    AS deleted,
+  um.first_at                           AS first_at,
+  um.last_at                            AS last_at,
+  COALESCE(um.messages, 0) * 1
+    + COALESCE(um.likes_received, 0) * 20
+    + COALESCE(lg.cnt, 0) * 10
+    - COALESCE(lv.cnt, 0) * 25
+    - COALESCE(k.cnt, 0) * 500
+    - COALESCE(d.cnt, 0) * 5             AS points
+FROM all_users au
+LEFT JOIN user_msgs um ON um.user_id = au.user_id
+LEFT JOIN (SELECT user_id, name, avatar_url FROM user_latest WHERE rn = 1) ul
+       ON ul.user_id = au.user_id
+LEFT JOIN users u       ON u.id = au.user_id
+LEFT JOIN likes_given lg ON lg.user_id = au.user_id
+LEFT JOIN leaves lv     ON lv.user_id = au.user_id
+LEFT JOIN kicks k       ON k.user_id = au.user_id
+LEFT JOIN deleted d     ON d.user_id = au.user_id
+ORDER BY points DESC
+LIMIT 100";
+
+        let mut stmt = self.conn.prepare(SQL)?;
+        let rows = stmt.query_map(params![conversation_id, since_unix], |r| {
+            Ok(LeaderboardRow {
+                user_id: r.get(0)?,
+                name: r.get(1)?,
+                avatar_url: r.get(2)?,
+                messages: r.get(3)?,
+                likes_received: r.get(4)?,
+                likes_given: r.get(5)?,
+                leaves: r.get(6)?,
+                kicks: r.get(7)?,
+                deleted: r.get(8)?,
+                first_at: r.get(9)?,
+                last_at: r.get(10)?,
+                points: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 }
 
 /// A user who posted in a conversation but is no longer in its current member
@@ -1268,6 +1596,55 @@ pub struct SearchHit {
     pub sender_name: Option<String>,
     pub text: Option<String>,
     pub created_at: i64,
+}
+
+/// Statistics for a single group conversation. Drives the group info / stats
+/// panel. See [`Store::group_stats`].
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupStatsData {
+    pub conversation_id: String,
+    /// Unix timestamp of the conversation's creation from the API. `None` when
+    /// the stored value is 0 (the schema default) or SQL NULL.
+    pub created_at: Option<i64>,
+    pub message_count: i64,
+    pub first_message_id: Option<String>,
+    pub first_message_at: Option<i64>,
+    /// Sender name on the oldest archived message.
+    pub first_message_name: Option<String>,
+    pub last_message_id: Option<String>,
+    pub last_message_at: Option<i64>,
+    /// All-time count of distinct non-system senders.
+    pub distinct_senders: i64,
+    /// Distinct non-system senders with at least one message in the last 30 days.
+    pub active_last_30d: i64,
+    pub messages_last_30d: i64,
+    /// Mean over the last 30 calendar days (UTC) of the per-day distinct-sender
+    /// count. Zero-activity days count as zero, so the denominator is always 30.
+    pub avg_active_per_day_30d: f64,
+    /// Midnight UTC (unix) of the day with the most messages, all time. The day
+    /// boundary uses `created_at / 86400 * 86400` — UTC midnight, not local time.
+    pub busiest_day_unix: Option<i64>,
+    pub busiest_day_count: i64,
+    pub top_sender_user_id: Option<String>,
+    pub top_sender_name: Option<String>,
+    pub top_sender_count: i64,
+}
+
+/// One row of the gamification leaderboard. See [`Store::leaderboard`].
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaderboardRow {
+    pub user_id: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub messages: i64,
+    pub likes_received: i64,
+    pub likes_given: i64,
+    pub leaves: i64,
+    pub kicks: i64,
+    pub deleted: i64,
+    pub points: i64,
+    pub first_at: Option<i64>,
+    pub last_at: Option<i64>,
 }
 
 const SCHEMA_V1: &str = r#"
@@ -2777,5 +3154,458 @@ mod tests {
         let again = Store::open(&path).unwrap();
         assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(again.list_conversations().unwrap().len(), 1);
+    }
+
+    // ------------------------------------------ analytics (new commands) ---
+
+    /// Guards against a build-feature regression: if the bundled SQLite is
+    /// compiled without JSON1, the leaderboard query silently returns nothing
+    /// instead of erroring, and everything looks fine until someone notices the
+    /// scoreboard is empty. This test catches that class of failure.
+    #[test]
+    fn json1_functions_available_in_bundled_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // json_each must iterate an array and yield one row per element.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM json_each('[\"a\",\"b\",\"c\"]')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3, "json_each must be available in the bundled SQLite");
+        // json_extract must navigate a path and return the value.
+        let v: i64 = conn
+            .query_row("SELECT json_extract('{\"k\":42}', '$.k')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, 42,
+            "json_extract must be available in the bundled SQLite"
+        );
+    }
+
+    /// `first_message_id` returns the message with the smallest `id_sort`
+    /// (oldest by GroupMe's monotonically increasing id space), and `None`
+    /// when the conversation has no archived messages.
+    #[test]
+    fn first_message_id_returns_oldest_by_sort_and_none_for_unknown() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        s.insert_messages(
+            "10000001",
+            &[
+                Message {
+                    id: "170000000000000003".into(),
+                    created_at: 300,
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000001".into(),
+                    created_at: 100,
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000002".into(),
+                    created_at: 200,
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.first_message_id("10000001").unwrap().as_deref(),
+            Some("170000000000000001"),
+            "must return the message with the lowest id_sort, not lowest created_at"
+        );
+        assert!(
+            s.first_message_id("10000002").unwrap().is_none(),
+            "unknown conversation must return None"
+        );
+    }
+
+    /// group_stats must correctly compute message counts, first/last message
+    /// pointers, sender counts, the 30-day window metrics, busiest day, and
+    /// top sender. All sender-based counts exclude system messages.
+    #[test]
+    fn group_stats_computes_all_fields() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_group(
+            &Group {
+                id: "10000001".into(),
+                created_at: 1_785_300_000,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        let now = now_unix();
+        let cutoff = now - 30 * 86400;
+
+        // Three messages in the ancient past (outside 30d window, all on day 0
+        // of the unix epoch so they share a busiest-day bucket with count 3).
+        // Three messages from user 20000001, two from 20000002, two from 20000003.
+        s.insert_messages(
+            "10000001",
+            &[
+                Message {
+                    id: "170000000000000001".into(),
+                    user_id: Some("20000001".into()),
+                    name: Some("Alice".into()),
+                    created_at: 1000,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000002".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Bob".into()),
+                    created_at: 2000,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000003".into(),
+                    user_id: Some("20000001".into()),
+                    name: Some("Alice".into()),
+                    created_at: 3000,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                // In 30d window, each on a distinct day.
+                Message {
+                    id: "170000000000000004".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Bob".into()),
+                    created_at: cutoff + 86400,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000005".into(),
+                    user_id: Some("20000001".into()),
+                    name: Some("Alice".into()),
+                    created_at: cutoff + 2 * 86400,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                // These two are on the same day bucket (now-10d), one user.
+                Message {
+                    id: "170000000000000006".into(),
+                    user_id: Some("20000003".into()),
+                    name: Some("Charlie".into()),
+                    created_at: cutoff + 20 * 86400,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000007".into(),
+                    user_id: Some("20000003".into()),
+                    name: Some("Charlie".into()),
+                    created_at: cutoff + 20 * 86400 + 1000,
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        let st = s.group_stats("10000001").unwrap();
+
+        assert_eq!(st.conversation_id, "10000001");
+        assert_eq!(st.created_at, Some(1_785_300_000));
+        assert_eq!(st.message_count, 7);
+
+        assert_eq!(
+            st.first_message_id.as_deref(),
+            Some("170000000000000001"),
+            "oldest by id_sort"
+        );
+        assert_eq!(st.first_message_at, Some(1000));
+        assert_eq!(st.first_message_name.as_deref(), Some("Alice"));
+
+        assert_eq!(
+            st.last_message_id.as_deref(),
+            Some("170000000000000007"),
+            "newest by id_sort"
+        );
+
+        assert_eq!(st.distinct_senders, 3);
+        assert_eq!(st.active_last_30d, 3, "all three sent within 30d");
+        assert_eq!(st.messages_last_30d, 4, "msgs 004-007 are in window");
+
+        // Daily distinct sum: day(cutoff+86400)→1, day(cutoff+2d)→1,
+        // day(cutoff+20d)→1 (both msg6 and msg7 are the same user on same day).
+        // Sum = 3, avg = 3/30 = 0.1.
+        assert!(
+            (st.avg_active_per_day_30d - 0.1).abs() < 1e-9,
+            "avg active per day should be 3/30 = 0.1, got {}",
+            st.avg_active_per_day_30d
+        );
+
+        // Busiest day (all time): msgs 001, 002, 003 are all on unix day 0
+        // (created_at 1000, 2000, 3000 < 86400), giving count=3.
+        assert_eq!(st.busiest_day_unix, Some(0), "day 0 of the unix epoch");
+        assert_eq!(st.busiest_day_count, 3);
+
+        // Top sender: user 20000001 has msgs 001, 003, 005 = 3 messages.
+        assert_eq!(st.top_sender_user_id.as_deref(), Some("20000001"));
+        assert_eq!(st.top_sender_name.as_deref(), Some("Alice"));
+        assert_eq!(st.top_sender_count, 3);
+
+        // group_stats on an unknown conversation must not panic.
+        let empty = s.group_stats("10000099").unwrap();
+        assert_eq!(empty.message_count, 0);
+        assert!(empty.first_message_id.is_none());
+        assert!(empty.created_at.is_none());
+    }
+
+    /// Full leaderboard scoring scenario: verifies likes, kicks vs leaves
+    /// distinguished by remover presence, deleted-message attribution, exact
+    /// point formula, DM exclusion on the all-groups query, and since_unix
+    /// filtering.
+    #[test]
+    fn leaderboard_scores_events_and_excludes_dms() {
+        use crate::model::SystemEvent;
+
+        let mut s = Store::open_in_memory().unwrap();
+
+        // Two groups.
+        for id in ["10000001", "10000002"] {
+            s.upsert_group(
+                &Group {
+                    id: id.into(),
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        }
+        // One DM — its messages must not appear in the all-groups leaderboard.
+        s.upsert_chat(
+            &Chat {
+                updated_at: 1,
+                other_user: crate::model::OtherUser {
+                    id: "20000006".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+
+        let now = now_unix();
+
+        // Group A messages: user 20000001 writes msg11 (liked by 002 and 003);
+        // user 20000002 writes msg12 (liked by 001).
+        s.insert_messages(
+            "10000001",
+            &[
+                Message {
+                    id: "170000000000000011".into(),
+                    user_id: Some("20000001".into()),
+                    name: Some("Alice".into()),
+                    created_at: now,
+                    favorited_by: vec!["20000002".into(), "20000003".into()],
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                Message {
+                    id: "170000000000000012".into(),
+                    user_id: Some("20000002".into()),
+                    name: Some("Bob".into()),
+                    created_at: now,
+                    favorited_by: vec!["20000001".into()],
+                    sender_type: Some("user".into()),
+                    ..Default::default()
+                },
+                // Kick: 20000001 removes 20000003 (remover != removed → kick).
+                Message {
+                    id: "170000000000000013".into(),
+                    system: true,
+                    created_at: now,
+                    event: Some(SystemEvent {
+                        kind: Some("membership.announce.removed".into()),
+                        data: serde_json::json!({
+                            "removed_user": {"id": "20000003"},
+                            "remover_user": {"id": "20000001"}
+                        }),
+                    }),
+                    ..Default::default()
+                },
+                // Leave: 20000004 exits on their own (no remover_user → leave).
+                Message {
+                    id: "170000000000000014".into(),
+                    system: true,
+                    created_at: now,
+                    event: Some(SystemEvent {
+                        kind: Some("membership.notifications.exited".into()),
+                        data: serde_json::json!({
+                            "removed_user": {"id": "20000004"}
+                        }),
+                    }),
+                    ..Default::default()
+                },
+                // Delete: attributes the deletion to the author of msg12 (20000002).
+                Message {
+                    id: "170000000000000015".into(),
+                    system: true,
+                    created_at: now,
+                    event: Some(SystemEvent {
+                        kind: Some("message.deleted".into()),
+                        data: serde_json::json!({
+                            "message_id": "170000000000000012",
+                            "deleted_at": 1_785_400_000
+                        }),
+                    }),
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+
+        // Group B: user 20000005 writes msg16 (liked by 20000001).
+        s.insert_messages(
+            "10000002",
+            &[Message {
+                id: "170000000000000016".into(),
+                user_id: Some("20000005".into()),
+                name: Some("Eve".into()),
+                created_at: now,
+                favorited_by: vec!["20000001".into()],
+                sender_type: Some("user".into()),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+
+        // DM: must be excluded from all-groups leaderboard.
+        s.insert_messages(
+            "20000006",
+            &[Message {
+                id: "170000000000000017".into(),
+                user_id: Some("20000006".into()),
+                created_at: now,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+
+        let board = s.leaderboard(None, None).unwrap();
+
+        // Build a lookup by user_id for easy assertion.
+        let by_uid: std::collections::HashMap<&str, &LeaderboardRow> =
+            board.iter().map(|r| (r.user_id.as_str(), r)).collect();
+
+        // DM user must be absent.
+        assert!(
+            !by_uid.contains_key("20000006"),
+            "DM user must not appear in the all-groups leaderboard"
+        );
+
+        // ------ user 20000001: 1 msg, 2 likes_received, 2 likes_given ------
+        let u1 = by_uid["20000001"];
+        assert_eq!(u1.messages, 1);
+        assert_eq!(u1.likes_received, 2, "msg11 liked by 002 and 003");
+        assert_eq!(u1.likes_given, 2, "liked msg12 and msg16");
+        assert_eq!(u1.leaves, 0);
+        assert_eq!(u1.kicks, 0);
+        assert_eq!(u1.deleted, 0);
+        // points = 1*1 + 2*20 + 2*10 = 61
+        assert_eq!(u1.points, 61);
+
+        // ------ user 20000002: 1 msg, 1 like_received, 1 like_given, 1 deleted ---
+        let u2 = by_uid["20000002"];
+        assert_eq!(u2.messages, 1);
+        assert_eq!(u2.likes_received, 1);
+        assert_eq!(u2.likes_given, 1, "liked msg11");
+        assert_eq!(u2.deleted, 1, "msg12 was deleted → attributed to 20000002");
+        // points = 1 + 20 + 10 - 5 = 26
+        assert_eq!(u2.points, 26);
+
+        // ------ user 20000003: 0 msgs, 1 like_given, 1 kick ----------------
+        let u3 = by_uid["20000003"];
+        assert_eq!(u3.messages, 0);
+        assert_eq!(u3.likes_given, 1, "liked msg11");
+        assert_eq!(u3.kicks, 1, "was kicked by 20000001 in msg13");
+        assert_eq!(u3.leaves, 0, "remover != removed → kick not leave");
+        // points = 0 + 0 + 10 - 500 = -490
+        assert_eq!(u3.points, -490);
+
+        // ------ user 20000004: 0 msgs, 1 leave (no remover) ----------------
+        let u4 = by_uid["20000004"];
+        assert_eq!(u4.messages, 0);
+        assert_eq!(u4.leaves, 1);
+        assert_eq!(u4.kicks, 0, "absent remover_user means leave not kick");
+        // points = -25
+        assert_eq!(u4.points, -25);
+
+        // ------ user 20000005: 1 msg in group B, 1 like_received ----------
+        let u5 = by_uid["20000005"];
+        assert_eq!(u5.messages, 1);
+        assert_eq!(u5.likes_received, 1);
+        // points = 1 + 20 = 21
+        assert_eq!(u5.points, 21);
+
+        // Ordering: 61, 26, 21, -25, -490
+        assert_eq!(board[0].user_id, "20000001");
+        assert_eq!(board[1].user_id, "20000002");
+        assert_eq!(board[2].user_id, "20000005");
+        assert_eq!(board[3].user_id, "20000004");
+        assert_eq!(board[4].user_id, "20000003");
+
+        // ---- scoped to group A only ----------------------------------------
+        let board_a = s.leaderboard(Some("10000001"), None).unwrap();
+        let by_uid_a: std::collections::HashMap<&str, &LeaderboardRow> =
+            board_a.iter().map(|r| (r.user_id.as_str(), r)).collect();
+        // 20000005 is only in group B, so must be absent.
+        assert!(
+            !by_uid_a.contains_key("20000005"),
+            "20000005 only posted in group B"
+        );
+        // 20000001's likes_given in group A only: liked msg12 (yes); did NOT
+        // like msg16 (group B). So likes_given=1.
+        assert_eq!(by_uid_a["20000001"].likes_given, 1);
+
+        // ---- since_unix filtering: old messages excluded -------------------
+        // An ancient message for 20000001 that predates the since_unix cutoff.
+        s.insert_messages(
+            "10000001",
+            &[Message {
+                id: "170000000000000018".into(),
+                user_id: Some("20000001".into()),
+                created_at: 1000,
+                sender_type: Some("user".into()),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+
+        // With since_unix = now - 86400 (yesterday), the ancient message is excluded.
+        let board_recent = s.leaderboard(None, Some(now - 86400)).unwrap();
+        let by_uid_r: std::collections::HashMap<&str, &LeaderboardRow> = board_recent
+            .iter()
+            .map(|r| (r.user_id.as_str(), r))
+            .collect();
+        // 20000001 still has 1 message from the recent batch (msg11, created_at=now).
+        assert_eq!(
+            by_uid_r["20000001"].messages, 1,
+            "the recent message must still count"
+        );
+        // If since_unix > now (far future), 20000001 disappears entirely.
+        let board_future = s.leaderboard(None, Some(now + 86400)).unwrap();
+        assert!(
+            board_future.is_empty() || !board_future.iter().any(|r| r.user_id == "20000001"),
+            "future since_unix must exclude all messages"
+        );
     }
 }
