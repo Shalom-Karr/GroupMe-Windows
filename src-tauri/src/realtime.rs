@@ -58,10 +58,10 @@
 //! `/user/{id}` channel regardless, so a conversation subscription only adds
 //! that thread's typing notices and read receipts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -72,6 +72,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::commands::SharedStore;
 use crate::model::{id_sort_key, ConversationKind, Message};
 use crate::store::Store;
+use crate::tray;
 
 const FAYE_URL: &str = "wss://push.groupme.com/faye";
 
@@ -96,6 +97,11 @@ const PING_EVERY: Duration = Duration::from_secs(45);
 
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const BACKOFF_CEILING: Duration = Duration::from_secs(300);
+
+/// Minimum gap between toasts for the same conversation. A burst of N messages
+/// fires at most one toast per conversation per this window so the tray is not
+/// flooded by a busy group.
+const NOTIFY_FLOOR: Duration = Duration::from_secs(30);
 
 /// Each variant carries the conversation's kind because the channel name cannot
 /// be derived from a stored id alone — see `conversation_channel`.
@@ -188,6 +194,7 @@ pub fn spawn(
         user_id,
         connected,
         frames: Frames::new(token),
+        notify_times: Mutex::new(HashMap::new()),
     };
     tauri::async_runtime::spawn(worker.run(rx));
 
@@ -200,6 +207,8 @@ struct Worker {
     user_id: String,
     connected: Arc<AtomicBool>,
     frames: Frames,
+    /// Per-conversation last-notified times for the 30-second burst floor.
+    notify_times: Mutex<HashMap<String, Instant>>,
 }
 
 #[derive(Debug)]
@@ -632,6 +641,7 @@ impl Worker {
 
             Inbound::Message(inc) => {
                 let stored = self.persist(&inc).await;
+                self.maybe_notify(&inc);
                 self.emit(
                     "realtime://message",
                     json!({
@@ -728,6 +738,101 @@ impl Worker {
             }),
         );
     }
+
+    /// Fire a desktop notification for an incoming message, subject to several
+    /// suppression gates. Best-effort: any error is logged and never propagates.
+    ///
+    /// Suppressed when:
+    /// - The message is a system event (joins, leaves, deletions).
+    /// - The sender is the signed-in account (no echo toasts).
+    /// - The conversation fired a toast within the last 30 seconds (burst floor).
+    /// - The main window is focused (tray::notify_message handles this internally).
+    /// - Notifications are globally off or the conversation is muted (also handled
+    ///   inside tray::notify_message).
+    ///
+    /// # Click-to-open
+    /// tauri-plugin-notification v2 does not expose a WinRT Toast click callback
+    /// through its Rust API on Windows desktop. Windows may bring a running app to
+    /// the foreground when the user clicks a toast (COM activation), but that
+    /// requires registering the process as a COM server — which is out of scope and
+    /// not provided by this plugin. At minimum, the notification fires and is
+    /// visible in the Action Centre; click behaviour is OS-default.
+    fn maybe_notify(&self, inc: &Incoming) {
+        // System messages (joins, leaves, deletions) carry no user content.
+        if inc.message.system || inc.message.sender_type.as_deref() == Some("system") {
+            return;
+        }
+        // Compare both fields: GroupMe sends user_id on group messages and
+        // sender_id on DMs; a message from self must never produce a toast.
+        if inc.message.user_id.as_deref() == Some(self.user_id.as_str())
+            || inc.message.sender_id.as_deref() == Some(self.user_id.as_str())
+        {
+            return;
+        }
+        // Rate-limit: one toast per conversation per 30 s to absorb bursts.
+        {
+            let mut times = self.notify_times.lock().unwrap_or_else(|e| e.into_inner());
+            if !burst_floor_pass(&mut times, &inc.conversation_id, Instant::now()) {
+                return;
+            }
+        }
+
+        let app = self.app.clone();
+        let store = Arc::clone(&self.store);
+        let conversation_id = inc.conversation_id.clone();
+        let kind = inc.kind;
+        let sender = inc.message.name.clone().unwrap_or_default();
+        let body = message_body(&inc.message);
+
+        // Look up the conversation name and fire the toast on the blocking pool.
+        // The store lock is blocking (never held across an await), so it cannot
+        // run on the async executor directly.
+        drop(tokio::task::spawn_blocking(move || {
+            // For a DM the conversation IS the other person, so passing sender as
+            // both arguments lets notification_title(s, s) collapse to just the
+            // sender name without stutter. For a group, look up the stored name.
+            let conversation = if kind == ConversationKind::Group {
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                guard
+                    .list_conversations()
+                    .ok()
+                    .and_then(|convs| convs.into_iter().find(|c| c.id == conversation_id))
+                    .and_then(|c| c.name)
+                    .unwrap_or_else(|| sender.clone())
+            } else {
+                sender.clone()
+            };
+            tray::notify_message(&app, &conversation_id, &sender, &body, &conversation);
+        }));
+    }
+}
+
+/// Build a notification body from a message.
+///
+/// Prefers the text field; falls back to "Sent a picture" when the message
+/// carries only attachments (text is absent or blank). The empty-string case is
+/// forwarded to `tray::notification_body`, which emits "New message".
+fn message_body(m: &Message) -> String {
+    let text = m.text.as_deref().unwrap_or("").trim();
+    if text.is_empty() && !m.attachments.is_empty() {
+        return "Sent a picture".to_string();
+    }
+    text.to_string()
+}
+
+/// Returns `true` and records `now` when `conv_id` has not been notified within
+/// `NOTIFY_FLOOR`; returns `false` (suppress) when it has. Updates `times` on
+/// the first call so the next call within the window is suppressed.
+///
+/// Extracted as a pure function so it can be unit-tested without a Tauri app.
+fn burst_floor_pass(times: &mut HashMap<String, Instant>, conv_id: &str, now: Instant) -> bool {
+    if let Some(last) = times.get(conv_id) {
+        if now.duration_since(*last) < NOTIFY_FLOOR {
+            return false;
+        }
+    }
+    times.insert(conv_id.to_string(), now);
+    true
 }
 
 /// Writes one realtime message into the archive.
@@ -1569,6 +1674,34 @@ mod tests {
         assert_eq!(conversation_id, "20000001+20000002");
         assert_eq!(kind, ConversationKind::Dm);
         assert_eq!(user_id.as_deref(), Some("20000002"));
+    }
+
+    #[test]
+    fn burst_floor_suppresses_repeated_notifications_within_30s() {
+        let mut times = HashMap::new();
+        let t0 = Instant::now();
+        let conv = "10000001";
+
+        // First notification for a conversation always passes.
+        assert!(burst_floor_pass(&mut times, conv, t0));
+        // Immediate repeat is suppressed.
+        assert!(!burst_floor_pass(&mut times, conv, t0));
+        // Still suppressed at 29 seconds.
+        assert!(!burst_floor_pass(
+            &mut times,
+            conv,
+            t0 + Duration::from_secs(29)
+        ));
+        // Exactly at the floor the gate re-opens.
+        let t1 = t0 + NOTIFY_FLOOR;
+        assert!(burst_floor_pass(&mut times, conv, t1));
+        // Immediately suppressed again.
+        assert!(!burst_floor_pass(&mut times, conv, t1));
+
+        // A different conversation has its own independent window.
+        let other = "10000002";
+        assert!(burst_floor_pass(&mut times, other, t0));
+        assert!(!burst_floor_pass(&mut times, other, t0));
     }
 
     #[test]

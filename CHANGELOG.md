@@ -2,6 +2,31 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.11.0] — 2026-08-03
+
+The messenger finally speaks up, and the client gets its finishing pass.
+
+### Added
+
+- **Desktop notifications.** New messages now notify — the code always existed,
+  nothing ever called it. Notifications skip your own messages and system
+  events, stay silent while the window is focused, respect per-conversation
+  mutes, and a burst in one conversation fires at most one toast per 30
+  seconds.
+- **Ctrl+K quick switcher.** Type a conversation name, Enter opens it; ↑/↓ to
+  choose. Alt+↑/↓ steps through the sidebar without the mouse.
+- **Image lightbox.** Click any image for a full-screen view — click to zoom,
+  wheel up to 6×, drag to pan, Esc to close.
+- **A floating "↓ Latest" pill** when scrolled into history.
+- **Backfill visibility.** The sync panel now says how many conversations are
+  still filling in deep history.
+
+### Fixed
+
+- Profile cards open instantly and fill in, instead of waiting on the lookup.
+- Focus rings, hover states, tooltips, ellipsis and scrollbars audited across
+  the client (most were already consistent; the stragglers now match).
+
 ## [0.10.0] — 2026-08-03
 
 ### Added
