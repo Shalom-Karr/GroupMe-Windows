@@ -826,6 +826,18 @@ impl SyncEngine {
                     }
                     if is_permanent(&e) {
                         self.blocked_media.lock().await.insert(url.clone());
+                        // Persist permanently unavailable state so the URL stays
+                        // out of the uncached_media_urls queue across restarts.
+                        // Best-effort: a store error here must not break the pass.
+                        let store_c = self.store.clone();
+                        let url_c = url.clone();
+                        let r = tokio::task::spawn_blocking(move || {
+                            lock_store(&store_c).mark_media_unavailable(&url_c)
+                        })
+                        .await;
+                        if let Ok(Err(ref e2)) = r {
+                            log::debug!("persisting permanent media failure for {url}: {e2}");
+                        }
                         // Expected, and there is one per attachment: GroupMe's
                         // attachment URLs redirect to expiring signed CDN links,
                         // so an old image answers 403 forever (§10). Logging each
@@ -1052,7 +1064,7 @@ fn advance_cursors(state: &mut SyncState, page: &[Message]) {
 /// 429 is the exception inside that range: it is a statement about the *rate*,
 /// not the asset, and blocking the URL for the life of the process would
 /// permanently lose a perfectly good attachment because we asked too fast.
-fn is_permanent(err: &ApiError) -> bool {
+pub(crate) fn is_permanent(err: &ApiError) -> bool {
     match err {
         ApiError::NotFound => true,
         ApiError::Status { status, .. } => (400..500).contains(status) && *status != 429,

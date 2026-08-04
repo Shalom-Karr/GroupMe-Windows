@@ -29,7 +29,7 @@ fn now_unix() -> i64 {
 }
 
 /// Bump only alongside a matching arm in `migrate`.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// v2 adds server read state to `conversations`.
 ///
@@ -64,6 +64,21 @@ const SCHEMA_V3: &[&str] = &[
 /// is ignored.
 const SCHEMA_V4: &[&str] =
     &["ALTER TABLE conversations ADD COLUMN former INTEGER NOT NULL DEFAULT 0"];
+
+/// v5 promotes `cached` in `attachments` to a tri-state: 0 = pending,
+/// 1 = cached locally, 2 = permanently unavailable (4xx). No `ALTER TABLE` is
+/// required — the column is an untyped `INTEGER` that already admits any value.
+/// `SCHEMA_V1` is updated to document the tri-state and to include the new
+/// covering index for `uncached_media_urls` (so fresh databases start correct).
+/// This migration adds that same index to existing archives; `CREATE INDEX IF
+/// NOT EXISTS` is idempotent, so running it on a fresh archive is safe.
+const SCHEMA_V5: &[&str] = &[
+    // Covering index: seek on cached=0, join messages by message_id, read url —
+    // all without touching the attachments heap. Reduces uncached_media_urls to
+    // O(uncached) regardless of total archive size.
+    "CREATE INDEX IF NOT EXISTS idx_attachments_uncached_queue \
+     ON attachments (cached, message_id, url)",
+];
 
 pub struct Store {
     conn: Connection,
@@ -225,6 +240,14 @@ impl Store {
             // Same in-place upgrade pattern: a fresh database already has this
             // column from SCHEMA_V1, and "duplicate column name" is ignored.
             for stmt in SCHEMA_V4 {
+                let _ = tx.execute(stmt, []);
+            }
+        }
+        if current >= 1 {
+            // v1..v4 -> v5: covering index for uncached_media_urls. SCHEMA_V1
+            // already includes the index for fresh databases; `CREATE INDEX IF
+            // NOT EXISTS` is idempotent so running it on both paths is safe.
+            for stmt in SCHEMA_V5 {
                 let _ = tx.execute(stmt, []);
             }
         }
@@ -1008,16 +1031,30 @@ impl Store {
                 fetched_at = excluded.fetched_at",
             params![url, local_path, content_type, bytes, now],
         )?;
-        // Keep the cached flag in attachments in sync with media_cache so that
-        // uncached_media_urls can seek on (cached, url) rather than scanning
-        // the whole table and joining. Both writes are in the same transaction
-        // so they cannot diverge across a crash.
+        // Keep the cached flag in sync with media_cache regardless of prior
+        // state: a URL that was marked permanently unavailable (cached=2) and
+        // later becomes fetchable (e.g. re-uploaded) recovers immediately.
+        // The UPDATE has no AND-on-prior-state, so state 2 → 1 is valid.
         tx.execute(
             "UPDATE attachments SET cached = 1 WHERE url = ?1",
             params![url],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Marks a URL as permanently unavailable (cached = 2) so it is removed
+    /// from the `uncached_media_urls` queue permanently, surviving restarts.
+    ///
+    /// Only transitions from state 0 (pending); a URL already cached (1) or
+    /// already marked unavailable (2) is left unchanged. Returns the number
+    /// of rows updated (0 or more, depending on how many attachment rows share
+    /// the same URL).
+    pub fn mark_media_unavailable(&self, url: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE attachments SET cached = 2 WHERE url = ?1 AND cached = 0",
+            params![url],
+        )?)
     }
 
     pub fn get_media(&self, url: &str) -> Result<Option<String>> {
@@ -1031,15 +1068,29 @@ impl Store {
             .optional()?)
     }
 
-    /// Remote asset URLs referenced by stored messages that are not yet cached.
+    /// Remote asset URLs referenced by stored messages that are not yet cached,
+    /// returned newest-message-first.
     ///
-    /// Uses an index seek on `(cached, url)` rather than a full table scan
-    /// with LEFT JOIN. On a mature archive where most attachments are cached
-    /// this is O(uncached) rather than O(all attachments).
+    /// Ordering matters: GroupMe attachment URLs redirect to expiring signed CDN
+    /// links. Old attachments answer 403 permanently while recent ones still
+    /// fetch — putting newest first means the budget reaches live URLs before
+    /// dead ones clog the LIMIT window.
+    ///
+    /// Query plan: `idx_attachments_uncached_queue (cached, message_id, url)`
+    /// seeks on `cached=0` and reads `(message_id, url)` without touching the
+    /// attachments heap. The `LEFT JOIN` to messages resolves `id_sort` via the
+    /// messages primary key. `GROUP BY url` replaces `DISTINCT` so `ORDER BY
+    /// MAX(id_sort) DESC` can rank across multiple messages sharing a URL.
+    /// `COALESCE(m.id_sort, 0)` pushes any orphaned attachment rows (whose
+    /// message was deleted) to the tail rather than erroring.
     pub fn uncached_media_urls(&self, limit: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT url FROM attachments
-             WHERE cached = 0 AND url IS NOT NULL
+            "SELECT a.url
+             FROM attachments a
+             LEFT JOIN messages m ON m.id = a.message_id
+             WHERE a.cached = 0 AND a.url IS NOT NULL
+             GROUP BY a.url
+             ORDER BY MAX(COALESCE(m.id_sort, 0)) DESC
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |r| r.get::<_, String>(0))?;
@@ -1790,15 +1841,21 @@ CREATE TABLE IF NOT EXISTS attachments (
     message_id TEXT NOT NULL,
     kind       TEXT NOT NULL,
     url        TEXT,
-    -- 0 = URL not yet in media_cache; 1 = cached locally.
-    -- Maintained by put_media (sets 1) and insert_messages (initialises from
-    -- media_cache at insert time). Enables an index seek in uncached_media_urls
-    -- instead of a full-table scan with LEFT JOIN on every sync cycle.
+    -- 0 = URL not yet in media_cache; 1 = cached locally;
+    -- 2 = permanently unavailable (4xx — GroupMe's signed CDN link has expired).
+    -- Maintained by: put_media (sets 1, clears state 2 if a URL recovers),
+    -- mark_media_unavailable (sets 2), and insert_messages (initialises from
+    -- media_cache at insert time so a re-inserted attachment row inherits the
+    -- cached state). State 2 naturally filters out of uncached_media_urls
+    -- (WHERE cached = 0), making the exclusion durable across restarts.
     cached     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments (message_id);
--- Covering index for the uncached_media_urls seek: WHERE cached=0 AND url IS NOT NULL
+-- Covering index for the uncached_media_urls seek: (cached, message_id, url)
+-- lets the planner seek on cached=0, resolve the messages LEFT JOIN via
+-- message_id, and read url — all without touching the attachments heap.
 CREATE INDEX IF NOT EXISTS idx_attachments_cached ON attachments (cached, url);
+CREATE INDEX IF NOT EXISTS idx_attachments_uncached_queue ON attachments (cached, message_id, url);
 
 CREATE TABLE IF NOT EXISTS media_cache (
     url          TEXT PRIMARY KEY,
@@ -3728,5 +3785,212 @@ mod tests {
             assert_eq!(e.messages, a.messages, "message count must match");
             assert_eq!(e.points, a.points, "points must match");
         }
+    }
+
+    // -------------------------------------- schema v5 / media queue fixes ---
+
+    /// `mark_media_unavailable` sets cached=2, which removes the URL from the
+    /// uncached_media_urls results (WHERE cached=0 filters it out).
+    #[test]
+    fn mark_media_unavailable_removes_url_from_uncached_list() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = msg("170000000000000001", "pic", 1);
+        m.attachments = vec![Attachment::Image {
+            url: Some("https://i.groupme.com/perm.png".into()),
+            source_url: None,
+            blur_hash: None,
+        }];
+        s.insert_messages("g1", &[m]).unwrap();
+        assert_eq!(
+            s.uncached_media_urls(10).unwrap().len(),
+            1,
+            "attachment must start in the uncached queue"
+        );
+
+        s.mark_media_unavailable("https://i.groupme.com/perm.png")
+            .unwrap();
+
+        assert!(
+            s.uncached_media_urls(10).unwrap().is_empty(),
+            "permanently unavailable URL must leave the uncached queue"
+        );
+
+        // Verify the cached column is 2.
+        let state: i32 = s
+            .conn
+            .query_row(
+                "SELECT cached FROM attachments WHERE url = ?1",
+                params!["https://i.groupme.com/perm.png"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state, 2,
+            "cached flag must be 2 after mark_media_unavailable"
+        );
+    }
+
+    /// `uncached_media_urls` must return the URL attached to the newest message
+    /// first. If id_sort is the ordering key, the highest id_sort wins.
+    #[test]
+    fn uncached_media_urls_returns_newest_first() {
+        let mut s = Store::open_in_memory().unwrap();
+
+        // Two messages: id_sort("170000000000000001") < id_sort("170000000000000002").
+        // The newer message has url2; the older has url1.
+        let mut m_old = msg("170000000000000001", "old pic", 1);
+        m_old.attachments = vec![Attachment::Image {
+            url: Some("https://i.groupme.com/old.png".into()),
+            source_url: None,
+            blur_hash: None,
+        }];
+        let mut m_new = msg("170000000000000002", "new pic", 2);
+        m_new.attachments = vec![Attachment::Image {
+            url: Some("https://i.groupme.com/new.png".into()),
+            source_url: None,
+            blur_hash: None,
+        }];
+        s.insert_messages("g1", &[m_old, m_new]).unwrap();
+
+        let urls = s.uncached_media_urls(10).unwrap();
+        assert_eq!(urls.len(), 2);
+        assert_eq!(
+            urls[0], "https://i.groupme.com/new.png",
+            "newer message's attachment must come first"
+        );
+        assert_eq!(
+            urls[1], "https://i.groupme.com/old.png",
+            "older message's attachment must come second"
+        );
+    }
+
+    /// `put_media` on a previously-unavailable URL (cached=2) must restore it
+    /// to cached=1 and add it to the media_cache, so get_media returns it.
+    #[test]
+    fn put_media_recovers_a_previously_unavailable_url() {
+        let mut s = Store::open_in_memory().unwrap();
+        let mut m = msg("170000000000000001", "pic", 1);
+        m.attachments = vec![Attachment::Image {
+            url: Some("https://i.groupme.com/rec.png".into()),
+            source_url: None,
+            blur_hash: None,
+        }];
+        s.insert_messages("g1", &[m]).unwrap();
+
+        // Mark unavailable (cached=2).
+        s.mark_media_unavailable("https://i.groupme.com/rec.png")
+            .unwrap();
+        assert!(s.uncached_media_urls(10).unwrap().is_empty());
+
+        // Now the URL becomes fetchable again — put_media must recover it.
+        s.put_media(
+            "https://i.groupme.com/rec.png",
+            "blobs/rec.png",
+            Some("image/png"),
+            42,
+            0,
+        )
+        .unwrap();
+
+        let state: i32 = s
+            .conn
+            .query_row(
+                "SELECT cached FROM attachments WHERE url = ?1",
+                params!["https://i.groupme.com/rec.png"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, 1, "put_media must restore cached=2 to cached=1");
+        assert_eq!(
+            s.get_media("https://i.groupme.com/rec.png")
+                .unwrap()
+                .as_deref(),
+            Some("blobs/rec.png"),
+            "get_media must return the path after recovery"
+        );
+    }
+
+    /// A v4 archive (no idx_attachments_uncached_queue) must migrate to v5 in
+    /// place, keeping all rows, and produce a consistent schema_version of 5.
+    #[test]
+    fn a_v4_archive_upgrades_to_v5_in_place_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+
+        // Build a v4-shaped archive: has conversations (with `former` column),
+        // messages, and attachments — but not idx_attachments_uncached_queue.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT,
+                    description TEXT, image_url TEXT, creator_user_id TEXT,
+                    created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0,
+                    messages_count INTEGER, last_message_id TEXT,
+                    last_message_text TEXT, last_message_created_at INTEGER,
+                    members_json TEXT, raw_json TEXT, synced_at INTEGER,
+                    unread_count INTEGER, last_read_message_id TEXT,
+                    last_read_at INTEGER,
+                    pin_rank INTEGER, muted INTEGER NOT NULL DEFAULT 0,
+                    former INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO conversations (id, kind, name, updated_at)
+                 VALUES ('10000001','group','Kept',42);
+                 CREATE TABLE messages (
+                    id TEXT PRIMARY KEY, id_sort INTEGER NOT NULL,
+                    conversation_id TEXT NOT NULL
+                 );
+                 INSERT INTO messages (id, id_sort, conversation_id)
+                 VALUES ('170000000000000001', 170000000000000001, '10000001');
+                 CREATE TABLE attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    url TEXT, cached INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO attachments (message_id, kind, url, cached)
+                 VALUES ('170000000000000001', 'image', 'https://i.groupme.com/v4.png', 0);
+                 CREATE TABLE media_cache (
+                    url TEXT PRIMARY KEY, local_path TEXT NOT NULL,
+                    content_type TEXT, bytes INTEGER, fetched_at INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE IF NOT EXISTS sync_state (
+                    conversation_id TEXT PRIMARY KEY,
+                    oldest_id TEXT, newest_id TEXT,
+                    backfill_complete INTEGER NOT NULL DEFAULT 0,
+                    last_sync_at INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY, name TEXT, avatar_url TEXT
+                 );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.schema_version().unwrap(),
+            SCHEMA_VERSION,
+            "schema version must be 5 after migration"
+        );
+
+        // Existing attachment row is preserved and still uncached.
+        let urls = s.uncached_media_urls(10).unwrap();
+        assert_eq!(
+            urls,
+            vec!["https://i.groupme.com/v4.png".to_string()],
+            "existing uncached attachment must survive the migration"
+        );
+
+        // Re-opening an already-migrated v5 archive must be a no-op.
+        drop(s);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            again.uncached_media_urls(10).unwrap().len(),
+            1,
+            "row must still be present after re-open"
+        );
     }
 }

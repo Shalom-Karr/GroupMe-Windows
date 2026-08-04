@@ -2389,9 +2389,13 @@
 
   function matchesSideFilter(c) {
     if (sideFilter.unread) {
-      var n = unreadCountOf(c);
-      // Only treat as unread when server explicitly says > 0. null/undefined = not unread.
-      if (!(n != null && n > 0)) return false;
+      // `isUnread` (the same predicate the sidebar badge uses), NOT a strict
+      // `unread_count > 0`. GroupMe never sends a usable count: read state comes
+      // from /v4/read_receipts, which yields a last-read id, so the archive's
+      // `unread_count` is only ever 0 (last read == newest) or NULL (unknown).
+      // Filtering on `> 0` therefore matched nothing at all, while rows beside it
+      // were visibly badged unread by the id comparison in `unreadInfo`.
+      if (!isUnread(c)) return false;
     }
     if (sideFilter.kind && c.kind !== sideFilter.kind) return false;
     return true;
@@ -3658,8 +3662,16 @@
           return;
         }
         showImage(slot, localSrc(p), "Attached image");
-      }, function () {
+      }, function (e) {
         if (!slot.isConnected) return;
+        var msg = String(e && e.message || e);
+        if (msg.indexOf("GONE:") === 0) {
+          // 403-permanent: the CDN link has expired and will never recover.
+          // Replace the button with quiet muted text — retrying is a lie.
+          miss.removeChild(dlBtn);
+          miss.appendChild(el("span", null, "No longer available from GroupMe"));
+          return;
+        }
         dlBtn.disabled = false;
         dlBtn.textContent = "Couldn’t download — tap to retry";
         state.mediaCache.delete(attUrl);

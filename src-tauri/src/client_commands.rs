@@ -28,6 +28,7 @@ use crate::api::{ApiError, GroupMeClient};
 use crate::commands::SharedStore;
 use crate::model::{ConversationKind, Message, Reaction, SystemEvent};
 use crate::store::Store;
+use crate::sync::is_permanent;
 
 /// An **async** lock, unlike [`SharedStore`]: the guard is held across the HTTP
 /// round trip, which a `std::sync::Mutex` guard cannot survive without making
@@ -951,9 +952,26 @@ pub async fn client_sync_media(
         let Some(api) = guard.as_ref() else {
             return Err(NOT_SIGNED_IN.into());
         };
-        api.fetch_bytes(&url)
-            .await
-            .map_err(|e| map_api("downloading the attachment", e))?
+        match api.fetch_bytes(&url).await {
+            Ok(v) => v,
+            Err(e) => {
+                if is_permanent(&e) {
+                    // Persist permanently unavailable state so the background
+                    // sync queue also drops this URL on restart.
+                    let store_c = store.inner().clone();
+                    let url_c = url.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let guard = store_c.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Err(e2) = guard.mark_media_unavailable(&url_c) {
+                            log::debug!("persisting permanent media failure for {url_c}: {e2}");
+                        }
+                    })
+                    .await;
+                    return Err("GONE: this attachment is no longer available from GroupMe".into());
+                }
+                return Err(map_api("downloading the attachment", e));
+            }
+        }
     };
 
     let media_dir = app

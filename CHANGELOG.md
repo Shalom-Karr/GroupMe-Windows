@@ -2,6 +2,27 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.13.0] — 2026-08-04
+
+Two bugs found by using the app: the unread filter matched nothing, and the
+attachment queue was jammed.
+
+### Fixed
+
+- **The Unread filter showed nothing.** GroupMe never sends a usable unread
+  count — read state arrives as a last-read message id — so the archive's
+  `unread_count` is only ever 0 or unknown, and a filter demanding "greater
+  than zero" could never match, even beside rows the sidebar was visibly
+  badging unread. It now uses the same test the badge does.
+- **Attachments stopped downloading.** The download queue asked for uncached
+  attachments with no ordering, so SQLite returned the oldest first — and those
+  have expired CDN links that answer 403 permanently. Because a permanent
+  failure was only remembered in memory, the same dead URLs refilled the queue
+  every cycle and newer, perfectly fetchable images were never reached. Dead
+  URLs are now recorded as unavailable so they leave the queue for good, and the
+  queue runs newest-first. A manual download of a genuinely expired attachment
+  now says so plainly instead of offering a retry that cannot succeed.
+
 ## [0.12.0] — 2026-08-03
 
 Hardening for 1.0: the updater routes around the filter, a blank window heals
