@@ -192,7 +192,7 @@ pub fn run() {
             // initialization script can only be attached at window-build time.
             // The returned handle is not stored — listeners that navigate the
             // window resolve it by label at each use, so a rebuild is transparent.
-            build_main_window(app.handle())?;
+            build_main_window(app.handle(), None)?;
 
             tray::init(app.handle())?;
             updater::spawn_periodic_check(app.handle().clone());
@@ -275,15 +275,27 @@ static RECOVERY_ATTEMPTED: std::sync::atomic::AtomicBool =
 /// occasion WebView2 fails to attach (blank-window / E_INVALIDARG race). Every
 /// window built here — including after a recovery — gets the same hook, so the
 /// rebuilt window behaves identically to the original one.
-fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
-    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App(ROUTER_PAGE.into()))
+///
+/// `data_directory` overrides the WebView2 user-data folder. Pass `None` for the
+/// normal path (WebView2's default, next to the binary). Pass `Some(fallback)` when
+/// the normal folder is locked by orphaned WebView2 processes — the fallback profile
+/// will have no cookies, so the GroupMe web view needs signing in again, but the
+/// archive and the stored API token are unaffected.
+fn build_main_window(
+    app: &tauri::AppHandle,
+    data_directory: Option<std::path::PathBuf>,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App(ROUTER_PAGE.into()))
         .title("GroupMe")
         .inner_size(1200.0, 820.0)
         .min_inner_size(800.0, 600.0)
         .resizable(true)
         .center()
-        .initialization_script(INJECT_JS)
-        .build()?;
+        .initialization_script(INJECT_JS);
+    if let Some(dir) = data_directory {
+        builder = builder.data_directory(dir);
+    }
+    let window = builder.build()?;
     tray::hook_close_to_tray(&window);
     Ok(window)
 }
@@ -325,21 +337,61 @@ fn spawn_webview_watchdog(app: tauri::AppHandle) {
 
         log::warn!(
             "no page reported in 15s — destroying and rebuilding the main webview \
-             (one attempt; E_INVALIDARG race suspected)"
+             (one attempt; profile-lock race suspected)"
         );
 
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.destroy();
         }
 
-        // Give any orphaned msedgewebview2.exe processes a beat to release the
-        // user-data folder before we try to open it again.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Bug fix 1: `destroy()` does not release the "main" label synchronously.
+        // Poll until it disappears before we try to create a new window with the
+        // same label — an immediate rebuild collides and fails with
+        // `a webview with label 'main' already exists`.
+        let label_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if app.get_webview_window("main").is_none() {
+                break;
+            }
+            if std::time::Instant::now() >= label_deadline {
+                log::warn!(
+                    "main window label not released after 5s; \
+                     proceeding with rebuild anyway"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Bug fix 2: the original profile folder may still be held by orphaned
+        // msedgewebview2.exe processes (error 0x800700AA — ERROR_BUSY, "resource
+        // in use"). Rebuilding against the same folder fails identically, so the
+        // recovery window is built against a sibling fallback profile instead.
+        // The cost: no cookies in the new webview, so the GroupMe web view will
+        // need signing in again. The archive and the API token (Credential
+        // Manager) are completely unaffected. Logged at WARN so the user can
+        // understand the sign-in prompt.
+        let fallback_dir = app
+            .path()
+            .app_local_data_dir()
+            .ok()
+            .map(|d| d.join("webview2-fallback"));
+
+        if let Some(ref dir) = fallback_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                log::warn!("could not create fallback WebView2 profile dir: {e}");
+            }
+            log::warn!(
+                "recovery build using fallback WebView2 profile ({dir:?}). \
+                 Your archive and stored API token are unaffected. \
+                 The GroupMe web view will need signing in again this session."
+            );
+        }
 
         // Reset the beacon so the second check is meaningful.
         PAGE_SEEN.store(false, std::sync::atomic::Ordering::Relaxed);
 
-        if let Err(e) = build_main_window(&app) {
+        if let Err(e) = build_main_window(&app, fallback_dir) {
             log::error!("webview rebuild failed: {e}");
             report_blank_window(&app);
             return;
@@ -355,20 +407,27 @@ fn spawn_webview_watchdog(app: tauri::AppHandle) {
     });
 }
 
+/// Diagnostic text emitted when the webview never attaches.
+///
+/// Extracted to a constant so the unit test can assert on the actual text that
+/// will appear in the log, not a separate copy. Both HRESULT codes must stay in
+/// this string; the test enforces that.
+const BLANK_WINDOW_ADVISORY: &str =
+    "no page reported in 15s — the webview almost certainly failed to attach, so the \
+     window is blank while the archive keeps syncing normally. Look for \
+     `failed to create webview` above. The profile-lock signature is one of two \
+     HRESULTs: 0x80070057 (E_INVALIDARG) or 0x800700AA (ERROR_BUSY, \"resource in \
+     use\") — both mean another WebView2 process still holds the app's user-data \
+     folder. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
+     msedgewebview2.exe for this app remains, then reopen.";
+
 /// Logs the detailed blank-window advisory and sends a system notification.
 ///
 /// Called by the watchdog when neither the first nor the recovered window
 /// produced a page beacon. The tray is the only surface still working in this
 /// state, so the notification is the one channel that can reach the user.
 fn report_blank_window(app: &tauri::AppHandle) {
-    log::error!(
-        "no page reported in 15s — the webview almost certainly failed to attach, so the \
-         window is blank while the archive keeps syncing normally. Look for \
-         `failed to create webview` above; 0x80070057 means another WebView2 process still \
-         holds {}. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
-         msedgewebview2.exe for this app remains, then reopen.",
-        "the app's user-data folder"
-    );
+    log::error!("{}", BLANK_WINDOW_ADVISORY);
 
     use tauri_plugin_notification::NotificationExt;
     let _ = app
@@ -1035,6 +1094,23 @@ mod tests {
         // listener is in this file, and a remote origin cannot invoke commands —
         // so this event is the only path between them.
         assert!(INJECT_JS.contains("groupme://switch-ui"));
+    }
+
+    /// The advisory text is the only user-facing explanation of a blank-window
+    /// failure. Two distinct HRESULTs produce the same symptom; naming only one
+    /// leads a user with the other code on a pointless search. Asserting against
+    /// `BLANK_WINDOW_ADVISORY` directly — not a copy — ensures a future edit to
+    /// that constant cannot silently drop either code.
+    #[test]
+    fn blank_window_advisory_names_both_profile_lock_hresults() {
+        assert!(
+            BLANK_WINDOW_ADVISORY.contains("0x80070057"),
+            "advisory must name E_INVALIDARG (0x80070057)"
+        );
+        assert!(
+            BLANK_WINDOW_ADVISORY.contains("0x800700AA"),
+            "advisory must name ERROR_BUSY (0x800700AA)"
+        );
     }
 
     #[test]

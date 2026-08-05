@@ -2,6 +2,37 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.13.1] — 2026-08-04
+
+### Fixed
+
+- **The blank-window recovery never worked.** Shipped in 0.12.0 and caught by a
+  real failure: it destroyed the window and rebuilt it immediately, but
+  `destroy()` does not free the window label synchronously, so the rebuild
+  collided with the window it had just destroyed. And even had it not, the
+  rebuild reused the same WebView2 profile folder — the very thing that was
+  locked — so it could only fail the same way. Recovery now waits for the label
+  to be released, then brings the window up on a separate fallback profile, so a
+  locked profile yields a working window instead of a blank one. The fallback
+  has no cookies, so the GroupMe web view needs signing in again for that
+  session; the archive, the custom client and the saved token are untouched, and
+  the log says exactly that.
+- The blank-window advisory named only `0x80070057`. The lock also presents as
+  `0x800700AA` ("the requested resource is in use") — the code actually observed
+  in the wild — and both are now named, with a test that fails if either is ever
+  dropped from the text.
+
+### Performance
+
+- **The leaderboard is now instant.** On a 1.08 M-message archive it previously
+  took 10–11 seconds for an all-groups query; it now takes ~78 ms (141× faster).
+  The fix is three precomputed daily rollup tables (`stats_messages_daily`,
+  `stats_likes_given_daily`, `stats_events_daily`) maintained inside the same
+  transaction as every page insert, so the leaderboard reads a few thousand rows
+  instead of scanning a million. The one-time backfill at first launch runs in
+  Rust (not Python), takes roughly 15–30 s on a large archive, and the log says
+  exactly how long it took.
+
 ## [0.13.0] — 2026-08-04
 
 Two bugs found by using the app: the unread filter matched nothing, and the

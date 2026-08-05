@@ -29,7 +29,7 @@ fn now_unix() -> i64 {
 }
 
 /// Bump only alongside a matching arm in `migrate`.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// v2 adds server read state to `conversations`.
 ///
@@ -78,6 +78,161 @@ const SCHEMA_V5: &[&str] = &[
     // O(uncached) regardless of total archive size.
     "CREATE INDEX IF NOT EXISTS idx_attachments_uncached_queue \
      ON attachments (cached, message_id, url)",
+];
+
+/// v6 adds two indexes that cut leaderboard query time by eliminating full
+/// table scans over the 1M+ message corpus.
+///
+/// `idx_messages_leader` covers the leaderboard aggregate CTEs (`user_msgs`,
+/// `likes_given`): the planner can seek on `system = 0`, read `user_id`,
+/// `created_at`, and `favorited_by_json` from the index without touching the
+/// messages heap pages that carry the large `raw_json` blobs.
+///
+/// `idx_messages_system` is a partial index for the system-event scan
+/// (`sys_msgs`, `kicks`, `leaves`, `deleted`): only the ~29k rows where
+/// `system = 1` are indexed, so the ~1M user messages are excluded entirely.
+/// The heap read for `raw_json` then touches only those rows.
+///
+/// Both are idempotent (`CREATE INDEX IF NOT EXISTS`) and are also declared in
+/// `SCHEMA_V1` so a fresh database starts with them without running this arm.
+const SCHEMA_V6: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_messages_leader \
+     ON messages (system, user_id, created_at, favorited_by_json)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_system \
+     ON messages (system) WHERE system = 1",
+];
+
+/// v7 adds three precomputed daily rollup tables that make `leaderboard_on`
+/// O(rollup rows) instead of O(messages). Day bucket = `created_at / 86400`
+/// (integer division, UTC). Fresh databases get the tables via `SCHEMA_V1`;
+/// existing v1..v6 archives get them here with a one-time backfill.
+///
+/// `CREATE TABLE IF NOT EXISTS` is idempotent so running these statements on a
+/// fresh archive (which already has the tables from SCHEMA_V1) is safe.
+const SCHEMA_V7_TABLES: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS stats_messages_daily (
+        conversation_id TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        day             INTEGER NOT NULL,
+        messages        INTEGER NOT NULL DEFAULT 0,
+        likes_received  INTEGER NOT NULL DEFAULT 0,
+        first_at        INTEGER,
+        last_at         INTEGER,
+        PRIMARY KEY (conversation_id, user_id, day)
+    )",
+    "CREATE TABLE IF NOT EXISTS stats_likes_given_daily (
+        conversation_id TEXT NOT NULL,
+        liker_id        TEXT NOT NULL,
+        day             INTEGER NOT NULL,
+        likes           INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (conversation_id, liker_id, day)
+    )",
+    "CREATE TABLE IF NOT EXISTS stats_events_daily (
+        conversation_id TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        day             INTEGER NOT NULL,
+        kind            TEXT NOT NULL,
+        n               INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (conversation_id, user_id, day, kind)
+    )",
+];
+
+/// Backfill queries for the v7 migration. Each is a single INSERT…SELECT that
+/// populates one rollup table from the entire messages corpus.  Runs once for
+/// existing archives; new archives start with empty tables (no rows to backfill).
+///
+/// These are NOT idempotent — do not run them on a table that already has data.
+const SCHEMA_V7_BACKFILL: &[&str] = &[
+    // stats_messages_daily: one row per (conversation, user, day).
+    // Matches leaderboard_on semantics exactly: system=0, user_id NOT NULL,
+    // sender_type NOT IN ('system','bot').
+    "INSERT INTO stats_messages_daily
+        (conversation_id, user_id, day, messages, likes_received, first_at, last_at)
+     SELECT
+        conversation_id,
+        user_id,
+        created_at / 86400,
+        COUNT(*),
+        COALESCE(SUM(
+            CASE WHEN favorited_by_json IS NULL
+                      OR favorited_by_json = ''
+                      OR favorited_by_json = '[]'
+                 THEN 0
+                 ELSE json_array_length(favorited_by_json) END
+        ), 0),
+        MIN(created_at),
+        MAX(created_at)
+     FROM messages
+     WHERE system = 0
+       AND user_id IS NOT NULL
+       AND (sender_type IS NULL OR sender_type NOT IN ('system', 'bot'))
+     GROUP BY conversation_id, user_id, created_at / 86400",
+    // stats_likes_given_daily: one row per (conversation, liker, day).
+    "INSERT INTO stats_likes_given_daily (conversation_id, liker_id, day, likes)
+     SELECT m.conversation_id,
+            CAST(je.value AS TEXT),
+            m.created_at / 86400,
+            COUNT(*)
+     FROM messages m, json_each(m.favorited_by_json) je
+     WHERE m.system = 0
+       AND m.favorited_by_json IS NOT NULL
+       AND m.favorited_by_json != '[]'
+       AND m.favorited_by_json != ''
+     GROUP BY m.conversation_id, CAST(je.value AS TEXT), m.created_at / 86400",
+    // stats_events_daily kind='kick': membership event, remover != removed.
+    "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+     SELECT
+        conversation_id,
+        CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+        created_at / 86400,
+        'kick',
+        COUNT(*)
+     FROM messages
+     WHERE system = 1
+       AND json_extract(raw_json, '$.event.type') LIKE 'membership%'
+       AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+       AND json_extract(raw_json, '$.event.data.remover_user.id') IS NOT NULL
+       AND CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) !=
+           CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+     GROUP BY conversation_id,
+              CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+              created_at / 86400",
+    // stats_events_daily kind='leave': membership event, remover absent or == removed.
+    "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+     SELECT
+        conversation_id,
+        CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+        created_at / 86400,
+        'leave',
+        COUNT(*)
+     FROM messages
+     WHERE system = 1
+       AND json_extract(raw_json, '$.event.type') LIKE 'membership%'
+       AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+       AND (
+         json_extract(raw_json, '$.event.data.remover_user.id') IS NULL
+         OR CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) =
+            CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+       )
+     GROUP BY conversation_id,
+              CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+              created_at / 86400",
+    // stats_events_daily kind='deleted': JOIN to resolve the author of the
+    // deleted message.  Bucketed by the system-message day, not the original.
+    "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+     SELECT sm.conversation_id,
+            m.user_id,
+            sm.created_at / 86400,
+            'deleted',
+            COUNT(*)
+     FROM messages sm
+     JOIN messages m
+       ON m.id = CAST(json_extract(sm.raw_json, '$.event.data.message_id') AS TEXT)
+      AND m.conversation_id = sm.conversation_id
+     WHERE sm.system = 1
+       AND json_extract(sm.raw_json, '$.event.type') = 'message.deleted'
+       AND m.user_id IS NOT NULL
+     GROUP BY sm.conversation_id, m.user_id, sm.created_at / 86400",
 ];
 
 pub struct Store {
@@ -249,6 +404,77 @@ impl Store {
             // NOT EXISTS` is idempotent so running it on both paths is safe.
             for stmt in SCHEMA_V5 {
                 let _ = tx.execute(stmt, []);
+            }
+        }
+        if current >= 1 {
+            // v1..v5 -> v6: leaderboard covering indexes. SCHEMA_V1 already
+            // declares them for fresh databases; `CREATE INDEX IF NOT EXISTS`
+            // is idempotent, so running this on a fresh archive is safe.
+            for stmt in SCHEMA_V6 {
+                let _ = tx.execute(stmt, []);
+            }
+        }
+        if current >= 1 {
+            // v1..v6 -> v7: precomputed daily rollup tables. SCHEMA_V1 declares
+            // all three tables for fresh databases, so `CREATE TABLE IF NOT
+            // EXISTS` is idempotent there. For existing archives the tables do
+            // not yet exist, so this creates them and runs the one-time backfill
+            // from the existing messages corpus.
+            //
+            // The backfill INSERTs are NOT idempotent and must only run when the
+            // tables are newly created (i.e., for an existing archive that never
+            // had them). They run inside the migration transaction: if any step
+            // fails, the transaction rolls back, user_version stays at the prior
+            // value, and the next launch retries cleanly from empty tables.
+            for stmt in SCHEMA_V7_TABLES {
+                // Propagate errors — unlike v2-v6 where ALTER TABLE can
+                // legitimately fail on a fresh database. CREATE TABLE IF NOT
+                // EXISTS should never fail.
+                tx.execute(stmt, [])?;
+            }
+            // Fresh databases skip the backfill (tables are empty; no messages).
+            // Existing archives need the one-time population of all three tables.
+            //
+            // Guard: production archives have had user_id/system/favorited_by_json
+            // since v1, but minimal test archives may omit them. If any are absent,
+            // skip the backfill and let insert_messages populate the tables
+            // incrementally going forward.
+            let msg_count = tx
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap_or(0);
+            let rollup_count = tx
+                .query_row("SELECT COUNT(*) FROM stats_messages_daily", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap_or(0);
+            let has_full_schema: bool = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('messages') \
+                     WHERE name IN ('user_id','system','favorited_by_json','sender_type','created_at')",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                == 5;
+            let needs_backfill = rollup_count == 0 && msg_count > 0 && has_full_schema;
+            if needs_backfill {
+                log::warn!(
+                    "v7 migration: building leaderboard rollup tables from {msg_count} messages \
+                     — this may take up to 60s on a large archive"
+                );
+                let t0 = std::time::Instant::now();
+                for stmt in SCHEMA_V7_BACKFILL {
+                    tx.execute(stmt, [])?;
+                }
+                log::info!(
+                    "v7 migration: rollup backfill complete in {:.1}s",
+                    t0.elapsed().as_secs_f64()
+                );
+            } else if rollup_count == 0 && msg_count > 0 {
+                log::info!(
+                    "v7 migration: messages table lacks full column set; \
+                     rollup tables will be populated incrementally by insert_messages"
+                );
             }
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -806,8 +1032,145 @@ impl Store {
                 }
             }
         }
+
+        // Recompute the daily rollup buckets touched by this page, inside the
+        // same transaction so rollups can never drift from the messages table.
+        // A page spans ~100 messages over at most a handful of days; recomputing
+        // each affected (conversation_id, day) pair is O(messages in that bucket),
+        // not O(whole archive), so this adds negligible overhead to each insert.
+        let days: std::collections::BTreeSet<i64> =
+            msgs.iter().map(|m| m.created_at / 86400).collect();
+        for day in days {
+            Self::recompute_rollup_bucket(&tx, conversation_id, day)?;
+        }
+
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// Deletes and recomputes all three rollup tables for a single
+    /// `(conversation_id, day)` bucket by re-aggregating from the `messages`
+    /// table.  Called by [`Self::insert_messages`] for every day touched by the
+    /// page being written.
+    ///
+    /// Correctness: because the recomputation is a full GROUP BY over the source
+    /// rows for that bucket, it is idempotent with respect to re-inserts and safe
+    /// against double-counting — which plain incrementing of counters would not be.
+    ///
+    /// Runs inside the caller's transaction (`conn` is the borrowed transaction
+    /// reference); no commit is performed here.
+    fn recompute_rollup_bucket(conn: &Connection, conversation_id: &str, day: i64) -> Result<()> {
+        // --- stats_messages_daily -------------------------------------------
+        conn.execute(
+            "DELETE FROM stats_messages_daily WHERE conversation_id = ?1 AND day = ?2",
+            params![conversation_id, day],
+        )?;
+        conn.execute(
+            "INSERT INTO stats_messages_daily
+                (conversation_id, user_id, day, messages, likes_received, first_at, last_at)
+             SELECT ?1, user_id, ?2,
+                    COUNT(*),
+                    COALESCE(SUM(
+                        CASE WHEN favorited_by_json IS NULL
+                                  OR favorited_by_json = ''
+                                  OR favorited_by_json = '[]'
+                             THEN 0
+                             ELSE json_array_length(favorited_by_json) END
+                    ), 0),
+                    MIN(created_at),
+                    MAX(created_at)
+             FROM messages
+             WHERE conversation_id = ?1
+               AND created_at / 86400 = ?2
+               AND system = 0
+               AND user_id IS NOT NULL
+               AND (sender_type IS NULL OR sender_type NOT IN ('system', 'bot'))
+             GROUP BY user_id",
+            params![conversation_id, day],
+        )?;
+
+        // --- stats_likes_given_daily ----------------------------------------
+        conn.execute(
+            "DELETE FROM stats_likes_given_daily WHERE conversation_id = ?1 AND day = ?2",
+            params![conversation_id, day],
+        )?;
+        conn.execute(
+            "INSERT INTO stats_likes_given_daily (conversation_id, liker_id, day, likes)
+             SELECT ?1, CAST(je.value AS TEXT), ?2, COUNT(*)
+             FROM messages m, json_each(m.favorited_by_json) je
+             WHERE m.conversation_id = ?1
+               AND m.created_at / 86400 = ?2
+               AND m.system = 0
+               AND m.favorited_by_json IS NOT NULL
+               AND m.favorited_by_json != '[]'
+               AND m.favorited_by_json != ''
+             GROUP BY CAST(je.value AS TEXT)",
+            params![conversation_id, day],
+        )?;
+
+        // --- stats_events_daily ---------------------------------------------
+        conn.execute(
+            "DELETE FROM stats_events_daily WHERE conversation_id = ?1 AND day = ?2",
+            params![conversation_id, day],
+        )?;
+        // Kicks: remover present and different from removed.
+        conn.execute(
+            "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+             SELECT ?1,
+                    CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+                    ?2, 'kick', COUNT(*)
+             FROM messages
+             WHERE conversation_id = ?1
+               AND created_at / 86400 = ?2
+               AND system = 1
+               AND json_extract(raw_json, '$.event.type') LIKE 'membership%'
+               AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+               AND json_extract(raw_json, '$.event.data.remover_user.id') IS NOT NULL
+               AND CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) !=
+                   CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+             GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)",
+            params![conversation_id, day],
+        )?;
+        // Leaves: remover absent or equal to removed (self-removal).
+        conn.execute(
+            "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+             SELECT ?1,
+                    CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT),
+                    ?2, 'leave', COUNT(*)
+             FROM messages
+             WHERE conversation_id = ?1
+               AND created_at / 86400 = ?2
+               AND system = 1
+               AND json_extract(raw_json, '$.event.type') LIKE 'membership%'
+               AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
+               AND (
+                 json_extract(raw_json, '$.event.data.remover_user.id') IS NULL
+                 OR CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) =
+                    CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
+               )
+             GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)",
+            params![conversation_id, day],
+        )?;
+        // Deleted: JOIN to resolve the author of the deleted message.
+        // The system event determines the day bucket; the target message can be
+        // from any day in the same conversation.
+        conn.execute(
+            "INSERT INTO stats_events_daily (conversation_id, user_id, day, kind, n)
+             SELECT ?1, m.user_id, ?2, 'deleted', COUNT(*)
+             FROM messages sm
+             JOIN messages m
+               ON m.id = CAST(json_extract(sm.raw_json, '$.event.data.message_id') AS TEXT)
+              AND m.conversation_id = ?1
+             WHERE sm.conversation_id = ?1
+               AND sm.created_at / 86400 = ?2
+               AND sm.system = 1
+               AND json_extract(sm.raw_json, '$.event.type') = 'message.deleted'
+               AND m.user_id IS NOT NULL
+             GROUP BY m.user_id",
+            params![conversation_id, day],
+        )?;
+
+        Ok(())
     }
 
     /// Apply an edit or delete event to the message it targets.
@@ -1493,91 +1856,71 @@ impl Store {
         conversation_id: Option<&str>,
         since_unix: Option<i64>,
     ) -> Result<Vec<LeaderboardRow>> {
+        // Rewritten for v7 to read ONLY the precomputed rollup tables
+        // (stats_messages_daily, stats_likes_given_daily, stats_events_daily)
+        // instead of scanning the 1M+ messages corpus.
+        //
+        // `since_unix` is filtered with day-granularity: `day >= ?2 / 86400`.
+        // This means a message sent at 23:59 on the cutoff day counts, and one
+        // sent at 00:01 the same day also counts — an acceptable approximation
+        // documented here.  The full-precision `created_at >= ?2` filter used by
+        // the old query is no longer available without a messages scan.
+        //
+        // `conversation_id IS NULL` = all groups (DMs excluded via kind = 'group');
+        // `conversation_id IS NOT NULL` = single conversation of any kind.
+        //
+        // Points formula unchanged: messages×1 + likes_received×20 + likes_given×10
+        //   − leaves×25 − kicks×500 − deleted×5.
+        //
+        // The rollup tables are maintained incrementally by `insert_messages`,
+        // so the data here is always exactly as up-to-date as the messages table.
         const SQL: &str = "
 WITH
-  base_msgs AS (
-    SELECT m.id, m.id_sort, m.user_id, m.name, m.avatar_url,
-           m.created_at, m.favorited_by_json, m.conversation_id
-    FROM messages m
-    JOIN conversations c ON c.id = m.conversation_id
-    WHERE m.system = 0
-      AND m.user_id IS NOT NULL
-      AND (m.sender_type IS NULL OR m.sender_type NOT IN ('system', 'bot'))
-      AND ((?1 IS NULL AND c.kind = 'group') OR m.conversation_id = ?1)
-      AND (?2 IS NULL OR m.created_at >= ?2)
+  board_convs AS MATERIALIZED (
+    SELECT id FROM conversations
+    WHERE (?1 IS NULL AND kind = 'group') OR id = ?1
   ),
   user_msgs AS (
-    SELECT user_id,
-           COUNT(*) AS messages,
-           COALESCE(SUM(
-             CASE WHEN favorited_by_json IS NULL
-                       OR favorited_by_json = ''
-                       OR favorited_by_json = '[]'
-                  THEN 0
-                  ELSE json_array_length(favorited_by_json) END
-           ), 0) AS likes_received,
-           MIN(created_at) AS first_at,
-           MAX(created_at) AS last_at
-    FROM base_msgs
-    GROUP BY user_id
-  ),
-  user_latest AS (
-    SELECT user_id, name, avatar_url,
-           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id_sort DESC) AS rn
-    FROM base_msgs
+    SELECT smd.user_id,
+           SUM(smd.messages)       AS messages,
+           SUM(smd.likes_received) AS likes_received,
+           MIN(smd.first_at)       AS first_at,
+           MAX(smd.last_at)        AS last_at
+    FROM stats_messages_daily smd
+    JOIN board_convs bc ON bc.id = smd.conversation_id
+    WHERE ?2 IS NULL OR smd.day >= ?2 / 86400
+    GROUP BY smd.user_id
   ),
   likes_given AS (
-    SELECT CAST(je.value AS TEXT) AS user_id, COUNT(*) AS cnt
-    FROM (
-      SELECT favorited_by_json
-      FROM base_msgs
-      WHERE favorited_by_json IS NOT NULL
-        AND favorited_by_json != '[]'
-        AND favorited_by_json != ''
-    ) AS fm, json_each(fm.favorited_by_json) je
-    GROUP BY CAST(je.value AS TEXT)
-  ),
-  sys_msgs AS (
-    SELECT m.raw_json, m.conversation_id
-    FROM messages m
-    JOIN conversations c ON c.id = m.conversation_id
-    WHERE m.system = 1
-      AND ((?1 IS NULL AND c.kind = 'group') OR m.conversation_id = ?1)
-      AND (?2 IS NULL OR m.created_at >= ?2)
+    SELECT lgd.liker_id AS user_id, SUM(lgd.likes) AS cnt
+    FROM stats_likes_given_daily lgd
+    JOIN board_convs bc ON bc.id = lgd.conversation_id
+    WHERE ?2 IS NULL OR lgd.day >= ?2 / 86400
+    GROUP BY lgd.liker_id
   ),
   kicks AS (
-    SELECT CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) AS user_id,
-           COUNT(*) AS cnt
-    FROM sys_msgs
-    WHERE json_extract(raw_json, '$.event.type') LIKE 'membership%'
-      AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
-      AND json_extract(raw_json, '$.event.data.remover_user.id') IS NOT NULL
-      AND CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) !=
-          CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
-    GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)
+    SELECT sed.user_id, SUM(sed.n) AS cnt
+    FROM stats_events_daily sed
+    JOIN board_convs bc ON bc.id = sed.conversation_id
+    WHERE sed.kind = 'kick'
+      AND (?2 IS NULL OR sed.day >= ?2 / 86400)
+    GROUP BY sed.user_id
   ),
   leaves AS (
-    SELECT CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) AS user_id,
-           COUNT(*) AS cnt
-    FROM sys_msgs
-    WHERE json_extract(raw_json, '$.event.type') LIKE 'membership%'
-      AND json_extract(raw_json, '$.event.data.removed_user.id') IS NOT NULL
-      AND (
-        json_extract(raw_json, '$.event.data.remover_user.id') IS NULL
-        OR CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT) =
-           CAST(json_extract(raw_json, '$.event.data.remover_user.id') AS TEXT)
-      )
-    GROUP BY CAST(json_extract(raw_json, '$.event.data.removed_user.id') AS TEXT)
+    SELECT sed.user_id, SUM(sed.n) AS cnt
+    FROM stats_events_daily sed
+    JOIN board_convs bc ON bc.id = sed.conversation_id
+    WHERE sed.kind = 'leave'
+      AND (?2 IS NULL OR sed.day >= ?2 / 86400)
+    GROUP BY sed.user_id
   ),
   deleted AS (
-    SELECT m.user_id, COUNT(*) AS cnt
-    FROM sys_msgs sm
-    JOIN messages m
-      ON m.id = CAST(json_extract(sm.raw_json, '$.event.data.message_id') AS TEXT)
-     AND m.conversation_id = sm.conversation_id
-    WHERE json_extract(sm.raw_json, '$.event.type') = 'message.deleted'
-      AND m.user_id IS NOT NULL
-    GROUP BY m.user_id
+    SELECT sed.user_id, SUM(sed.n) AS cnt
+    FROM stats_events_daily sed
+    JOIN board_convs bc ON bc.id = sed.conversation_id
+    WHERE sed.kind = 'deleted'
+      AND (?2 IS NULL OR sed.day >= ?2 / 86400)
+    GROUP BY sed.user_id
   ),
   all_users AS (
     SELECT user_id FROM user_msgs
@@ -1588,8 +1931,8 @@ WITH
   )
 SELECT
   au.user_id,
-  COALESCE(ul.name, u.name)             AS name,
-  COALESCE(ul.avatar_url, u.avatar_url) AS avatar_url,
+  u.name                                AS name,
+  u.avatar_url                          AS avatar_url,
   COALESCE(um.messages, 0)              AS messages,
   COALESCE(um.likes_received, 0)        AS likes_received,
   COALESCE(lg.cnt, 0)                   AS likes_given,
@@ -1606,8 +1949,6 @@ SELECT
     - COALESCE(d.cnt, 0) * 5             AS points
 FROM all_users au
 LEFT JOIN user_msgs um ON um.user_id = au.user_id
-LEFT JOIN (SELECT user_id, name, avatar_url FROM user_latest WHERE rn = 1) ul
-       ON ul.user_id = au.user_id
 LEFT JOIN users u       ON u.id = au.user_id
 LEFT JOIN likes_given lg ON lg.user_id = au.user_id
 LEFT JOIN leaves lv     ON lv.user_id = au.user_id
@@ -1835,6 +2176,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv_sort
     ON messages (conversation_id, id_sort DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_created
     ON messages (created_at DESC);
+-- v6: covering index for leaderboard aggregates (user_msgs, likes_given).
+-- Seek on system=0; read user_id, created_at, favorited_by_json from the index
+-- without touching the heap pages that carry raw_json.
+CREATE INDEX IF NOT EXISTS idx_messages_leader
+    ON messages (system, user_id, created_at, favorited_by_json);
+-- v6: partial index for the system-event scan. Only the ~29k system=1 rows are
+-- indexed; the 1M+ user messages are excluded, so the heap read for raw_json
+-- on sys_msgs touches only those rows.
+CREATE INDEX IF NOT EXISTS idx_messages_system
+    ON messages (system) WHERE system = 1;
 
 CREATE TABLE IF NOT EXISTS attachments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1896,6 +2247,41 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
     VALUES ('delete', old.rowid, old.text);
     INSERT INTO messages_fts (rowid, text) VALUES (new.rowid, new.text);
 END;
+
+-- v7: precomputed daily rollup tables for instant leaderboard reads.
+-- Day bucket = created_at / 86400 (integer division, UTC).
+-- Maintained incrementally by insert_messages: each page recomputes only the
+-- affected (conversation_id, day) buckets within the same transaction, so the
+-- rollups can never drift from the messages they summarise.
+CREATE TABLE IF NOT EXISTS stats_messages_daily (
+    conversation_id TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    -- created_at / 86400, UTC — integer division, day 0 = 1970-01-01.
+    day             INTEGER NOT NULL,
+    messages        INTEGER NOT NULL DEFAULT 0,
+    likes_received  INTEGER NOT NULL DEFAULT 0,
+    first_at        INTEGER,
+    last_at         INTEGER,
+    PRIMARY KEY (conversation_id, user_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS stats_likes_given_daily (
+    conversation_id TEXT NOT NULL,
+    liker_id        TEXT NOT NULL,
+    day             INTEGER NOT NULL,
+    likes           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, liker_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS stats_events_daily (
+    conversation_id TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    day             INTEGER NOT NULL,
+    -- 'kick' | 'leave' | 'deleted'
+    kind            TEXT NOT NULL,
+    n               INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, user_id, day, kind)
+);
 "#;
 
 #[cfg(test)]
@@ -3992,5 +4378,196 @@ mod tests {
             1,
             "row must still be present after re-open"
         );
+    }
+
+    /// Both v6 indexes must be present on a fresh in-memory archive and on an
+    /// existing archive after migration.
+    #[test]
+    fn v6_indexes_exist_after_migration() {
+        let s = Store::open_in_memory().unwrap();
+        let has_idx = |name: &str| -> bool {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'index' AND name = ?1",
+                    params![name],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0
+        };
+        assert!(
+            has_idx("idx_messages_leader"),
+            "idx_messages_leader must exist after a fresh open"
+        );
+        assert!(
+            has_idx("idx_messages_system"),
+            "idx_messages_system must exist after a fresh open"
+        );
+    }
+
+    /// A v5 archive (no idx_messages_leader / idx_messages_system) must migrate
+    /// to v6 in place, keeping its rows, and arrive at SCHEMA_VERSION.
+    #[test]
+    fn a_v5_archive_upgrades_to_v6_in_place_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+
+        // Build a v5-shaped archive: has the idx_attachments_uncached_queue
+        // index (added in v5) but NOT the two v6 leaderboard indexes.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT,
+                    description TEXT, image_url TEXT, creator_user_id TEXT,
+                    created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0,
+                    messages_count INTEGER, last_message_id TEXT,
+                    last_message_text TEXT, last_message_created_at INTEGER,
+                    members_json TEXT, raw_json TEXT, synced_at INTEGER,
+                    unread_count INTEGER, last_read_message_id TEXT,
+                    last_read_at INTEGER,
+                    pin_rank INTEGER, muted INTEGER NOT NULL DEFAULT 0,
+                    former INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO conversations (id, kind, name, updated_at)
+                 VALUES ('10000001','group','Kept',42);
+                 CREATE TABLE messages (
+                    id TEXT PRIMARY KEY, id_sort INTEGER NOT NULL,
+                    conversation_id TEXT NOT NULL, source_guid TEXT,
+                    user_id TEXT, sender_id TEXT, sender_type TEXT,
+                    name TEXT, avatar_url TEXT, text TEXT,
+                    created_at INTEGER NOT NULL DEFAULT 0,
+                    system INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT, favorited_by_json TEXT,
+                    reactions_json TEXT, event_json TEXT,
+                    deleted_at INTEGER, updated_at INTEGER, raw_json TEXT
+                 );
+                 INSERT INTO messages (id, id_sort, conversation_id, created_at, system)
+                 VALUES ('170000000000000001', 170000000000000001, '10000001', 1000, 0);
+                 CREATE TABLE attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    url TEXT, cached INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_attachments_uncached_queue
+                    ON attachments (cached, message_id, url);
+                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE IF NOT EXISTS sync_state (
+                    conversation_id TEXT PRIMARY KEY,
+                    oldest_id TEXT, newest_id TEXT,
+                    backfill_complete INTEGER NOT NULL DEFAULT 0,
+                    last_sync_at INTEGER
+                 );
+                 CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY, name TEXT, avatar_url TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS media_cache (
+                    url TEXT PRIMARY KEY, local_path TEXT NOT NULL,
+                    content_type TEXT, bytes INTEGER, fetched_at INTEGER
+                 );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 5).unwrap();
+        }
+
+        let s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.schema_version().unwrap(),
+            SCHEMA_VERSION,
+            "schema version must be bumped to the current version after migration"
+        );
+
+        // Both v6 indexes must be present.
+        let idx_count: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' \
+                   AND name IN ('idx_messages_leader', 'idx_messages_system')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 2,
+            "both v6 indexes must be present after migrating from v5"
+        );
+
+        // The existing message row must survive.
+        let msg_count: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            msg_count, 1,
+            "existing rows must survive the v5→v6 migration"
+        );
+
+        // Re-opening the now-v6 archive must be a no-op.
+        drop(s);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(again.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            again
+                .conn
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    /// Times the v7 backfill on the real bench copy of the archive.
+    /// Skipped unless the bench DB exists at the hard-coded path.
+    /// Run with: cargo test --all-features -- --nocapture --ignored time_v7_backfill_on_bench_copy
+    #[test]
+    #[ignore]
+    fn time_v7_backfill_on_bench_copy() {
+        let src = std::path::Path::new(
+            r"C:\Users\nates\AppData\Local\Temp\claude\C--Users-nates-Downloads-Claude-GroupMe-Windows\a723f7b4-cc8f-4cbe-9746-f04aedb072d7\scratchpad\bench.db",
+        );
+        if !src.exists() {
+            eprintln!("bench.db not found, skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("bench_rust.db");
+        std::fs::copy(src, &dst).unwrap();
+        // Copy WAL/SHM if present.
+        for suffix in &["-wal", "-shm"] {
+            let src2 = src.parent().unwrap().join(format!("bench.db{suffix}"));
+            if src2.exists() {
+                let dst2 = dir.path().join(format!("bench_rust.db{suffix}"));
+                let _ = std::fs::copy(src2, dst2);
+            }
+        }
+
+        // Open at v6; migration to v7 (including backfill) runs during open.
+        let t0 = std::time::Instant::now();
+        let s = Store::open(&dst).unwrap();
+        eprintln!(
+            "v7 migration (including backfill): {:.2}s",
+            t0.elapsed().as_secs_f64()
+        );
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+        // Time the new leaderboard (locked path).
+        let t1 = std::time::Instant::now();
+        let board = s.leaderboard(None, None).unwrap();
+        eprintln!(
+            "leaderboard() all-groups all-time (locked): {}ms, {} rows",
+            t1.elapsed().as_millis(),
+            board.len()
+        );
+
+        // Time via side connection (mirrors the production path).
+        let side = s.open_readonly().unwrap();
+        let t2 = std::time::Instant::now();
+        let board2 = Store::leaderboard_on(&side, None, None).unwrap();
+        eprintln!(
+            "leaderboard_on() all-groups (side conn): {}ms",
+            t2.elapsed().as_millis()
+        );
+        assert_eq!(board.len(), board2.len());
     }
 }
