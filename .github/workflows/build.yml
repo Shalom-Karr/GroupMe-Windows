@@ -1,8 +1,8 @@
 name: Build
 
 # Fires when the compiled app actually changes. Documentation and tooling edits
-# do not produce a different binary, so they do not burn a Windows runner or cut
-# a release nobody needs.
+# do not produce a different binary, so they do not burn a runner or cut a
+# release nobody needs.
 on:
   push:
     branches: [main]
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test
+    name: Test (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,14 +74,94 @@ jobs:
         working-directory: src-tauri
         run: cargo test --all-features
 
-  release:
-    name: Release
-    # Never ship an installer built from code that failed its tests.
-    needs: test
-    if: github.event_name != 'pull_request'
-    runs-on: windows-latest
+  test-linux:
+    name: Test (Linux)
+    # ubuntu-22.04 is pinned rather than ubuntu-latest because the WebKit
+    # package name differs between LTS releases and a floating tag can silently
+    # change the set of installed headers between runs.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libxdo-dev
+
+      # Same pinned toolchain as the Windows job. Both jobs must agree on the
+      # lint set; a drift between them would produce Linux-specific failures
+      # that do not show locally on Windows.
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: >
+          cargo clippy --all-targets --
+          -D clippy::correctness
+          -D clippy::suspicious
+          -D clippy::perf
+
+      # Keyring tests tolerate a missing Secret Service daemon: they call
+      # save() and skip quietly on Store(_), so no gnome-keyring is needed.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+  release:
+    name: Release (${{ matrix.os }})
+    # Never ship an installer built from code that failed its tests on either
+    # platform. Both test jobs must be green before any bundle is produced.
+    needs: [test, test-linux]
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: msi,nsis
+          - os: ubuntu-22.04
+            bundles: deb,rpm,appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libgtk-3-dev \
+            libxdo-dev
 
       # Pinned, not `@stable`. A floating toolchain silently changes the lint
       # set between runs, so a tree that is clean locally fails CI on lints the
@@ -102,11 +182,11 @@ jobs:
 
       - name: Read version
         id: version
-        shell: pwsh
+        shell: bash
         run: |
-          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          "value=$v" >> $env:GITHUB_OUTPUT
-          "Building version $v"
+          v=$(node -e "process.stdout.write(require('./src-tauri/tauri.conf.json').version)")
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Building version $v"
 
       - name: Build installers and publish release
         uses: tauri-apps/tauri-action@v0
@@ -120,15 +200,50 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: GroupMe for Windows v__VERSION__
+          releaseName: GroupMe v__VERSION__
           releaseBody: |
-            Native Windows build of GroupMe with a local offline archive.
+            Native desktop build of GroupMe with a local offline archive.
+            Supports **Windows** and **Linux**.
 
-            **Download:** the `.msi` for a standard install, or the
-            `-setup.exe` (NSIS) if you prefer that installer.
+            ---
 
-            Requires the WebView2 runtime, which is preinstalled on Windows 11
-            and installed automatically by the bundled bootstrapper otherwise.
+            ### Windows
+
+            **Download:** the `-setup.exe` (NSIS, recommended) or the `.msi`.
+
+            | | `-setup.exe` (NSIS) | `.msi` |
+            |---|---|---|
+            | Auto-updates | **Yes** | **No** |
+            | Needs admin | No | Yes |
+            | Installs to | `%LOCALAPPDATA%` | `Program Files` |
+
+            Only the NSIS build auto-updates. Pick the `.msi` only for policy-managed
+            or scripted deployment.
+
+            **Requires:** WebView2 runtime (pre-installed on Windows 11; the NSIS
+            bootstrapper installs it automatically on Windows 10).
+
+            ---
+
+            ### Linux
+
+            | Artifact | Use when |
+            |---|---|
+            | `.deb` | Ubuntu, Debian, and derivatives (apt) |
+            | `.rpm` | Fedora, openSUSE, and RHEL derivatives |
+            | `.AppImage` | Any distribution; portable, no install needed |
+
+            **Runtime dependencies:** `libwebkit2gtk-4.1-0`, `libayatana-appindicator3-1`
+            (the `.deb` declares these; install them manually for `.rpm` / AppImage).
+
+            **Saved sign-in requires a Secret Service provider** — GNOME Keyring or
+            KWallet must be running. Without one the app still works for the session
+            but will ask you to sign in again after a restart.
+
+            Linux support is newly added and less battle-tested than Windows.
+            Report issues at the repository.
+
+            ---
 
             Read offline; sending requires a connection.
 
@@ -136,18 +251,17 @@ jobs:
             See LICENSE.
           releaseDraft: false
           prerelease: false
-          # Both bundles: MSI for policy-managed / silent deployment, NSIS for
-          # ordinary users. Building only one always turns out to be the wrong one.
-          args: --bundles msi,nsis
+          args: --bundles ${{ matrix.bundles }}
 
       - name: Summarise artifacts
         if: always()
-        shell: pwsh
+        shell: bash
         run: |
-          $dir = "src-tauri/target/release/bundle"
-          if (Test-Path $dir) {
-            Get-ChildItem $dir -Recurse -Include *.msi, *.exe |
-              ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
-          } else {
-            "no bundle directory produced"
-          }
+          dir="src-tauri/target/release/bundle"
+          if [ -d "$dir" ]; then
+            find "$dir" -type f \( -name "*.msi" -o -name "*.exe" -o -name "*.deb" \
+              -o -name "*.rpm" -o -name "*.AppImage" \) \
+              -exec sh -c 'printf "%s  %.1f MB\n" "$(basename "$1")" "$(du -m "$1" | cut -f1)"' _ {} \;
+          else
+            echo "no bundle directory produced"
+          fi

@@ -1,9 +1,11 @@
-# GroupMe for Windows
+# GroupMe Desktop
 
 **[Download](https://github.com/Shalom-Karr/groupme-windows/releases/latest)** ·
 **[groupme-windows on the web](https://shalom-karr.github.io/groupme-windows/)**
 
-A native Windows desktop app built with Tauri 2 and Rust. It wraps `https://web.groupme.com` in a WebView2 window while a background Rust worker archives groups, DMs, messages, and media into a local SQLite database. When the network is unavailable, the window switches to a bundled offline reader backed by that archive.
+A native desktop app for Windows and Linux, built with Tauri 2 and Rust. It wraps `https://web.groupme.com` in a webview window while a background Rust worker archives groups, DMs, messages, and media into a local SQLite database. When the network is unavailable, the window switches to a bundled offline reader backed by that archive.
+
+> **Platform notes:** Windows is the primary target and has seen the most real-world use. Linux support was added in v0.14.0 and is less battle-tested — please report any issues.
 
 Three things make it worth installing:
 
@@ -21,16 +23,35 @@ See [docs/architecture.md](docs/architecture.md) for how the three parts fit tog
 
 ## Requirements
 
-### To run
+### To run — Windows
 
 - Windows 10 or Windows 11
-- WebView2 runtime (the installer embeds a bootstrapper that installs it automatically)
+- WebView2 runtime (the NSIS installer embeds a bootstrapper that installs it automatically)
 
-### To build
+### To run — Linux
+
+- A GTK3 desktop environment (GNOME, KDE, XFCE, etc.)
+- `libwebkit2gtk-4.1-0` — WebKit engine (installed automatically by the `.deb`)
+- `libayatana-appindicator3-1` — system tray icon (installed automatically by the `.deb`)
+- **GNOME Keyring or KWallet** — required for sign-in to persist across restarts. Without a running Secret Service provider the app still works, but will ask you to sign in every launch.
+
+### To build — Windows
 
 - Rust 1.77 or later (set in `Cargo.toml` via `rust-version`)
 - Node.js 20 or later
 - MSVC Build Tools (the C++ workload — required by `rusqlite`'s bundled SQLite)
+- `@tauri-apps/cli` (installed automatically by `npm install`)
+
+### To build — Linux
+
+- Rust 1.77 or later
+- Node.js 20 or later
+- System packages:
+  ```
+  sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+    librsvg2-dev patchelf build-essential libssl-dev libgtk-3-dev libxdo-dev
+  ```
+  (Fedora/rpm: equivalent `webkit2gtk4.1-devel`, `libayatana-appindicator-devel`)
 - `@tauri-apps/cli` (installed automatically by `npm install`)
 
 ---
@@ -40,20 +61,25 @@ See [docs/architecture.md](docs/architecture.md) for how the three parts fit tog
 ```
 npm install
 npm run tauri dev        # development build with live reload
-npm run tauri build      # release build + NSIS installer
+npm run tauri build      # release build + installers
 ```
 
-The release installer lands at:
+**Windows** release installers land at:
 
 ```
-src-tauri\target\release\bundle\nsis\GroupMe_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\GroupMe_x.y.z_x64-setup.exe
+src-tauri\target\release\bundle\msi\GroupMe_x.y.z_x64_en-US.msi
 ```
 
-The release binary itself is at `src-tauri\target\release\groupme-desktop.exe`. The NSIS installer is the distributable artifact; the raw binary has no runtime WebView2 bootstrapper.
+**Linux** release packages land at:
 
-An `.msi` is built alongside it at `src-tauri\target\release\bundle\msi\`.
+```
+src-tauri/target/release/bundle/deb/groupme-desktop_x.y.z_amd64.deb
+src-tauri/target/release/bundle/rpm/groupme-desktop-x.y.z-1.x86_64.rpm
+src-tauri/target/release/bundle/appimage/groupme-desktop_x.y.z_amd64.AppImage
+```
 
-### Install the `-setup.exe`, not the `.msi`
+### Windows: install the `-setup.exe`, not the `.msi`
 
 Both work, but they are not equivalent:
 
@@ -71,6 +97,22 @@ and cannot answer one, so elevation and silent updates are mutually exclusive.
 The NSIS build installs per-user precisely so updates need no admin rights at
 all. The MSI exists for policy-managed or scripted deployment, where a central
 system handles versioning anyway.
+
+### Linux: which package to install
+
+| Artifact | Use when |
+|---|---|
+| `.deb` | Ubuntu, Debian, and derivatives |
+| `.rpm` | Fedora, openSUSE, RHEL derivatives |
+| `.AppImage` | Any distribution; no install needed, just make it executable |
+
+The `.deb` declares its runtime library dependencies so they install automatically.
+For `.rpm` and `.AppImage`, install `libwebkit2gtk-4.1-0` and `libayatana-appindicator3-1`
+(or their distro equivalents) manually if they are not already present.
+
+**Auto-updates on Linux:** the updater is included and will work once the Linux
+artifacts appear in a release's `latest.json`. Sign-in must persist (Secret Service
+required) for the updater to run unattended.
 
 ---
 
@@ -96,21 +138,27 @@ When connectivity is lost the window switches to the local archive. You can brow
 
 ## Where data lives
 
-All application data is under:
+**Windows:**
 
 ```
 %LOCALAPPDATA%\dev.shalomkarr.groupme\
+```
+
+Local, not roaming. `%APPDATA%` is the roaming profile, which a domain-joined
+machine synchronises to the server at logon — and this archive reaches multiple
+gigabytes.
+
+**Linux:**
+
+```
+~/.local/share/dev.shalomkarr.groupme/
 ```
 
 | Path | Contents |
 |---|---|
 | `archive.db` | SQLite archive: conversations, messages, users, media index |
 | `archive.db-wal` | SQLite WAL file (normal; do not delete while the app is running) |
-| `media\` | Downloaded media bytes (images, video previews, avatars) |
-
-Local, not roaming. `%APPDATA%` is the roaming profile, which a domain-joined
-machine synchronises to the server at logon — and this archive reaches multiple
-gigabytes.
+| `media/` | Downloaded media bytes (images, video previews, avatars) |
 
 To move or back up the archive, copy the whole directory with the app closed.
 Copying `archive.db` alone while it is running gives you a database missing
@@ -120,9 +168,9 @@ whatever is still in the WAL.
 
 ## Privacy and security
 
-**Access token.** The GroupMe `x-access-token` (a ~40-character bearer credential equivalent in power to the account password) is stored in Windows Credential Manager under the service name `dev.shalomkarr.groupme`. It is never written to the SQLite archive or any config file in plaintext. The archive stores only a SHA-256 fingerprint so the app can detect when a different account signs in.
+**Access token.** The GroupMe `x-access-token` (a ~40-character bearer credential equivalent in power to the account password) is stored in the platform credential store — Windows Credential Manager on Windows, or the Secret Service (GNOME Keyring / KWallet) on Linux — under the service name `dev.shalomkarr.groupme`. It is never written to the SQLite archive or any config file in plaintext. The archive stores only a SHA-256 fingerprint so the app can detect when a different account signs in. On Linux, if no Secret Service provider is running, the token cannot be saved and sign-in will be required on every launch.
 
-**The archive is not encrypted.** `archive.db` and the `blobs\` directory are ordinary files under your Windows user profile. Anyone with access to your user account or disk can read every archived message and view every cached image. If this is a concern, use Windows BitLocker or equivalent full-disk encryption.
+**The archive is not encrypted.** `archive.db` and the `media/` directory are ordinary files under your user profile. Anyone with access to your user account or disk can read every archived message and view every cached image. If this is a concern, use full-disk encryption (BitLocker on Windows, LUKS on Linux).
 
 **The archiver is read-only.** No write operation (`POST`, `PUT`, `DELETE`) is ever issued against the GroupMe API. The app cannot send messages, delete content, or modify your account on your behalf. Offline read-only is structural, not a UI convention — there is no send command registered on the offline surface.
 
@@ -146,7 +194,7 @@ GroupMe Windows\
 │   │   ├── store.rs           # SQLite schema, migrations, all read/write paths
 │   │   ├── tray.rs            # Tray icon, menu, sync-status panel
 │   │   ├── updater.rs         # Update check, staged install on exit
-│   │   └── token.rs           # Windows Credential Manager wrapper, fingerprinting
+│   │   └── token.rs           # Platform credential store wrapper, fingerprinting
 │   ├── capabilities\          # Per-window permission scopes
 │   ├── frontend\
 │   │   ├── index.html      # Connectivity router; opens the last-used surface

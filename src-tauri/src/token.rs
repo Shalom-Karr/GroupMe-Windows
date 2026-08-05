@@ -5,11 +5,12 @@
 //! `x-access-token` request header — the stable wire contract, never a
 //! localStorage key that can be renamed at any deploy.
 //!
-//! Once received, the token is persisted in Windows Credential Manager via
-//! `keyring` and **never** written to the SQLite archive or any config file
-//! in plaintext.  The archive stores only a SHA-256 fingerprint so the app
-//! can detect when a different account has signed in and refuse to mix two
-//! people's messages in one database.
+//! Once received, the token is persisted in the platform credential store via
+//! `keyring` and **never** written to the SQLite archive or any config file in
+//! plaintext. On Windows this is Credential Manager; on Linux it is the Secret
+//! Service (GNOME Keyring / KWallet). The archive stores only a SHA-256
+//! fingerprint so the app can detect when a different account has signed in and
+//! refuse to mix two people's messages in one database.
 
 use sha2::{Digest, Sha256};
 
@@ -229,10 +230,10 @@ mod tests {
 
     // ── keyring round-trip ────────────────────────────────────────────────
     //
-    // Gated to Windows only (that's where Windows Credential Manager lives).
-    // Tolerates a missing/locked credential store so CI without keyring
-    // support doesn't fail the entire suite — if save() returns Store(_) we
-    // simply skip the rest of the test rather than panicking.
+    // Platform-specific: Windows uses Credential Manager; Linux uses the
+    // Secret Service (gnome-keyring / KWallet). Both tests tolerate a missing
+    // or locked credential store so CI without a live keyring daemon does not
+    // fail the whole suite — if save() returns Store(_) we skip quietly.
 
     #[test]
     #[cfg(windows)]
@@ -265,6 +266,40 @@ mod tests {
     fn save_rejects_malformed_token() {
         let store = TokenStore::with_account("dev.shalomkarr.groupme.test", "test-malformed-token");
         // Short / non-alphanumeric — must be rejected before touching keyring.
+        assert!(matches!(store.save("bad!"), Err(TokenError::Malformed)));
+    }
+
+    /// Linux Secret Service round-trip. On a CI runner without gnome-keyring or
+    /// KWallet the Store(_) error is expected and the test exits cleanly.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn keyring_roundtrip_linux() {
+        let store =
+            TokenStore::with_account("dev.shalomkarr.groupme.test", "test-roundtrip-token-linux");
+        let _ = store.delete();
+
+        let token = "TestRoundTripToken1234567890ABCDEFGHIJKx";
+        assert!(looks_like_token(token), "test token must pass validation");
+
+        match store.save(token) {
+            // No Secret Service running — expected in headless CI, skip quietly.
+            Err(TokenError::Store(_)) => return,
+            Err(e) => panic!("unexpected save error: {e}"),
+            Ok(()) => {}
+        }
+
+        let loaded = store.load().expect("token should be loadable after save");
+        assert_eq!(loaded, token);
+
+        assert!(store.has_token());
+        store.delete().expect("delete should succeed after save");
+        assert!(!store.has_token());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn save_rejects_malformed_token_linux() {
+        let store = TokenStore::with_account("dev.shalomkarr.groupme.test", "test-malformed-linux");
         assert!(matches!(store.save("bad!"), Err(TokenError::Malformed)));
     }
 }

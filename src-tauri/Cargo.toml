@@ -1,7 +1,7 @@
 [package]
 name = "groupme-desktop"
-version = "0.13.1"
-description = "GroupMe for Windows — native desktop shell (Tauri 2) with a local SQLite archive for offline reading"
+version = "0.14.0"
+description = "GroupMe desktop app (Windows + Linux) — native Tauri 2 shell with a local SQLite archive for offline reading"
 authors = ["Shalom Karr"]
 # AGPL-3.0-only WITH the Commons Clause condition. Commons Clause has no SPDX
 # identifier, so the file is authoritative and `license` is deliberately unset —
@@ -45,21 +45,20 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # native-tls, NOT rustls-tls.
 #
 # `rustls-tls` validates against webpki-roots -- a Mozilla root store compiled
-# into the binary -- and ignores the Windows certificate store completely. On
-# any machine behind TLS inspection (corporate proxy, security appliance, AV
-# with HTTPS scanning) the presented chain is issued by a private root that
-# lives in the Windows store, so rustls rejects it with
-# `invalid peer certificate: UnknownIssuer` while Edge, Chrome and PowerShell
-# on the same machine all succeed.
+# into the binary -- and ignores the OS certificate store completely. On any
+# machine behind TLS inspection (corporate proxy, security appliance, AV with
+# HTTPS scanning) the presented chain is issued by a private root that lives in
+# the OS store only, so rustls rejects it with `invalid peer certificate:
+# UnknownIssuer` while Edge, Chrome and PowerShell on the same machine succeed.
 #
 # That failure is total and silent here: no API reachability means the router
 # never reaches GroupMe, so no token is captured, so nothing ever syncs and the
 # archive stays empty.
 #
-# native-tls uses schannel on Windows -- the same TLS stack, and the same trust
-# store, as every other application on the machine. For a Windows-only desktop
-# app that is the correct default: it should work wherever the user's browser
-# already works.
+# native-tls uses schannel on Windows and OpenSSL on Linux -- the same TLS stack
+# and trust store as every other application on the machine. A desktop app that
+# should work wherever the user's browser works must use the OS TLS stack, not a
+# bundled root store the OS admin cannot update.
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "native-tls",
@@ -71,10 +70,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Access token lives in Windows Credential Manager, never in the SQLite file or
-# a plaintext config. The DB holds only a fingerprint so we can tell whether the
-# archive belongs to the account currently signed in.
-keyring = { version = "3", features = ["windows-native"] }
 sha2 = "0.10"
 
 anyhow = "1"
@@ -82,9 +77,10 @@ thiserror = "2"
 log = "0.4"
 tauri-plugin-log = "2"
 
-# Faye realtime. native-tls here for the same reason as reqwest: schannel uses
-# the Windows trust store, so the socket works on machines behind TLS
-# inspection where a bundled root store does not.
+# Faye realtime. native-tls here for the same reason as reqwest: the OS TLS
+# stack (schannel on Windows, OpenSSL on Linux) uses the system trust store, so
+# the socket works on machines behind TLS inspection where a bundled root store
+# does not.
 tokio-tungstenite = { version = "0.24", default-features = false, features = [
   "connect",
   "native-tls",
@@ -94,6 +90,32 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # source_guid on outgoing messages. GroupMe echoes it back, which is how an
 # optimistic local row is matched to the server's copy instead of duplicating.
 uuid = { version = "1", features = ["v4"] }
+
+# Access token is stored in the platform credential store, never in the SQLite
+# archive or any plaintext config. The DB holds only a SHA-256 fingerprint so
+# the app can detect when a different account has signed in.
+#
+# Platform choice:
+#
+#   Windows — Credential Manager (windows-native): the same secure vault used by
+#     every other Windows application. Always present; no configuration needed.
+#
+#   Linux — Secret Service via D-Bus (sync-secret-service): the protocol spoken
+#     by GNOME Keyring and KWallet. `linux-native` (kernel keyutils) is
+#     deliberately avoided: it is session-scoped and silently loses the token on
+#     logout, which is indistinguishable from a sign-out. `sync-secret-service`
+#     is the SYNCHRONOUS variant because `token.rs` calls it from blocking code.
+#     `crypto-openssl` reuses the OpenSSL already pulled in by native-tls; no new
+#     system dependency. REQUIREMENT: a running Secret Service provider (GNOME
+#     Keyring or KWallet). If none is running, save/load fail with an explicit
+#     WARN log and the token is not persisted — the app still syncs for the
+#     current session but will require signing in again after a restart.
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-openssl"] }
 
 [dev-dependencies]
 # Every API-client test runs against a local mock rather than api.groupme.com,

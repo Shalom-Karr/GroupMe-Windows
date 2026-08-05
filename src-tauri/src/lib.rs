@@ -364,25 +364,32 @@ fn spawn_webview_watchdog(app: tauri::AppHandle) {
         }
 
         // Bug fix 2: the original profile folder may still be held by orphaned
-        // msedgewebview2.exe processes (error 0x800700AA — ERROR_BUSY, "resource
-        // in use"). Rebuilding against the same folder fails identically, so the
-        // recovery window is built against a sibling fallback profile instead.
-        // The cost: no cookies in the new webview, so the GroupMe web view will
-        // need signing in again. The archive and the API token (Credential
-        // Manager) are completely unaffected. Logged at WARN so the user can
-        // understand the sign-in prompt.
+        // webview processes. On Windows these are msedgewebview2.exe processes
+        // (error 0x800700AA — ERROR_BUSY, "resource in use"); on Linux they are
+        // WebKitGTK web processes. Rebuilding against the same folder fails
+        // identically, so the recovery window uses a sibling fallback profile.
+        // Cost: no cookies in the new webview, so the GroupMe web view will need
+        // signing in again. The archive and the API token (credential store) are
+        // completely unaffected. Logged at WARN so the user understands the prompt.
         let fallback_dir = app
             .path()
             .app_local_data_dir()
             .ok()
-            .map(|d| d.join("webview2-fallback"));
+            .map(|d| d.join("webview-fallback"));
 
         if let Some(ref dir) = fallback_dir {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                log::warn!("could not create fallback WebView2 profile dir: {e}");
+                log::warn!("could not create fallback webview profile dir: {e}");
             }
+            #[cfg(windows)]
             log::warn!(
                 "recovery build using fallback WebView2 profile ({dir:?}). \
+                 Your archive and stored API token are unaffected. \
+                 The GroupMe web view will need signing in again this session."
+            );
+            #[cfg(not(windows))]
+            log::warn!(
+                "recovery build using fallback web data directory ({dir:?}). \
                  Your archive and stored API token are unaffected. \
                  The GroupMe web view will need signing in again this session."
             );
@@ -410,8 +417,11 @@ fn spawn_webview_watchdog(app: tauri::AppHandle) {
 /// Diagnostic text emitted when the webview never attaches.
 ///
 /// Extracted to a constant so the unit test can assert on the actual text that
-/// will appear in the log, not a separate copy. Both HRESULT codes must stay in
-/// this string; the test enforces that.
+/// will appear in the log, not a separate copy.
+///
+/// On Windows both HRESULT codes must stay in the string; the test enforces that.
+/// On Linux the advisory names WebKitGTK processes instead.
+#[cfg(windows)]
 const BLANK_WINDOW_ADVISORY: &str =
     "no page reported in 15s — the webview almost certainly failed to attach, so the \
      window is blank while the archive keeps syncing normally. Look for \
@@ -420,6 +430,14 @@ const BLANK_WINDOW_ADVISORY: &str =
      use\") — both mean another WebView2 process still holds the app's user-data \
      folder. Fully quit GroupMe (tray -> Quit), confirm no groupme-desktop.exe or \
      msedgewebview2.exe for this app remains, then reopen.";
+
+#[cfg(not(windows))]
+const BLANK_WINDOW_ADVISORY: &str =
+    "no page reported in 15s — the webview almost certainly failed to attach, so the \
+     window is blank while the archive keeps syncing normally. Look for \
+     `failed to create webview` above. The most likely cause is another WebKitGTK web \
+     process still holding the app's web data directory. Fully quit GroupMe \
+     (tray -> Quit), confirm no groupme-desktop process remains, then reopen.";
 
 /// Logs the detailed blank-window advisory and sends a system notification.
 ///
@@ -716,8 +734,13 @@ fn start_sync(
     });
 }
 
-/// Writes the verified token to Windows Credential Manager and records its
+/// Writes the verified token to the platform credential store and records its
 /// fingerprint. Skipped when the same token is already stored.
+///
+/// A keyring failure is not fatal: the app still syncs and archives for the
+/// current session. The failure is logged at WARN so the user knows sign-in
+/// will not be remembered. No plaintext fallback is provided — storing the
+/// token unencrypted on disk would contradict the project's privacy posture.
 async fn persist_token(store: &SharedStore, token: &str) -> anyhow::Result<()> {
     let fingerprint = token::fingerprint(token);
     let already_known = {
@@ -732,9 +755,20 @@ async fn persist_token(store: &SharedStore, token: &str) -> anyhow::Result<()> {
         .await??
     };
     if !already_known {
-        token::TokenStore::new()
-            .save(token)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Err(e) = token::TokenStore::new().save(token) {
+            // On Linux a Secret Service provider (GNOME Keyring / KWallet) must
+            // be running for the token to persist across restarts. Without one
+            // the app is still functional for this session — sync and archiving
+            // are unaffected — but sign-in will be required again after a restart.
+            log::warn!(
+                "no system keyring available; sign-in cannot be saved ({e}). {}",
+                if cfg!(target_os = "linux") {
+                    "On Linux, ensure GNOME Keyring or KWallet is running."
+                } else {
+                    ""
+                }
+            );
+        }
     }
     Ok(())
 }
@@ -1101,7 +1135,11 @@ mod tests {
     /// leads a user with the other code on a pointless search. Asserting against
     /// `BLANK_WINDOW_ADVISORY` directly — not a copy — ensures a future edit to
     /// that constant cannot silently drop either code.
+    ///
+    /// Gated to Windows because the Linux advisory names WebKitGTK, not
+    /// WebView2, and does not contain HRESULT codes.
     #[test]
+    #[cfg(windows)]
     fn blank_window_advisory_names_both_profile_lock_hresults() {
         assert!(
             BLANK_WINDOW_ADVISORY.contains("0x80070057"),

@@ -2,6 +2,40 @@
 
 Follows the [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) format.
 
+## [0.14.0] — 2026-08-05
+
+Linux support.
+
+### Added
+
+- **The app builds and packages for Linux**, as `.deb`, `.rpm` and
+  `.AppImage` alongside the Windows installers, published to the same release.
+  The archive, sync engine, API client and client UI were already
+  platform-neutral; what changed is the parts that were not.
+- **Token storage per platform.** Windows keeps Credential Manager; Linux uses
+  the Secret Service (GNOME Keyring or KWallet) so sign-in survives a reboot.
+  The kernel-keyutils backend was deliberately rejected — it is session-scoped
+  and would lose the token at logout, which looks exactly like being signed out.
+  If no Secret Service is running, the app still syncs for the session and says
+  in the log that sign-in cannot be saved, rather than failing silently or
+  writing the token to disk in plaintext.
+- **CI builds and tests both platforms.** A Linux job runs the same clippy and
+  test suite, and both must pass before either platform's installers are built.
+
+### Changed
+
+- The blank-window advisory, which names WebView2 error codes and
+  `msedgewebview2.exe`, is Windows-only text now — on Linux the engine is
+  WebKitGTK and those codes mean nothing.
+- A credential-store failure no longer aborts sign-in. It is logged and the
+  session continues, since the token is held in memory regardless.
+
+### Note
+
+Windows remains the primary, battle-tested target. Linux is verified to compile
+and package in CI; its runtime behaviour on a real desktop — tray, keyring
+prompts, WebKitGTK rendering — has not yet been exercised.
+
 ## [0.13.1] — 2026-08-04
 
 ### Fixed

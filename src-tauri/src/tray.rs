@@ -355,7 +355,11 @@ fn build_tray(app: &tauri::AppHandle, account: Option<String>) -> tauri::Result<
     let autostart_i = CheckMenuItem::with_id(
         app,
         "autostart_toggle",
-        "Start with Windows",
+        if cfg!(windows) {
+            "Start with Windows"
+        } else {
+            "Launch on login"
+        },
         true,
         AUTOSTART.load(Ordering::Relaxed),
         None::<&str>,
